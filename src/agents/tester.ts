@@ -1,12 +1,12 @@
 // ============================================
 // OpenSwarm - Tester Agent
-// Test execution agent (Claude CLI based)
+// Test execution agent (CLI adapter based)
 // ============================================
 
-import { spawn } from 'node:child_process';
-import fs from 'node:fs/promises';
 import { homedir } from 'node:os';
 import type { WorkerResult } from './agentPair.js';
+import type { AdapterName } from '../adapters/types.js';
+import { getAdapter, spawnCli } from '../adapters/index.js';
 import { type CostInfo, extractCostFromStreamJson, formatCost } from '../support/costTracker.js';
 
 /**
@@ -30,6 +30,7 @@ export interface TesterOptions {
   projectPath: string;
   timeoutMs?: number;
   model?: string;
+  adapterName?: AdapterName;
 }
 
 export interface TesterResult {
@@ -118,18 +119,18 @@ On failure:
  */
 export async function runTester(options: TesterOptions): Promise<TesterResult> {
   const prompt = buildTesterPrompt(options);
-  const promptFile = `/tmp/tester-prompt-${Date.now()}.txt`;
+  const cwd = expandPath(options.projectPath);
+  const adapter = getAdapter(options.adapterName);
 
   try {
-    // Save prompt
-    await fs.writeFile(promptFile, prompt);
+    const raw = await spawnCli(adapter, {
+      prompt,
+      cwd,
+      timeoutMs: options.timeoutMs,
+      model: options.model,
+    });
 
-    // Run Claude CLI
-    const cwd = expandPath(options.projectPath);
-    const output = await runClaudeCli(promptFile, cwd, options.timeoutMs, options.model);
-
-    // Parse result
-    return parseTesterOutput(output);
+    return parseTesterOutput(raw.stdout);
   } catch (error) {
     return {
       success: false,
@@ -138,73 +139,7 @@ export async function runTester(options: TesterOptions): Promise<TesterResult> {
       output: '',
       error: error instanceof Error ? error.message : String(error),
     };
-  } finally {
-    // Clean up temp file
-    try {
-      await fs.unlink(promptFile);
-    } catch {
-      // Ignore
-    }
   }
-}
-
-/**
- * Run Claude CLI
- */
-async function runClaudeCli(
-  promptFile: string,
-  cwd: string,
-  timeoutMs: number = 300000, // 5 min default
-  model?: string
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const modelFlag = model ? ` --model ${model}` : '';
-    const cmd = `echo "" | claude -p "$(cat ${promptFile})" --output-format stream-json --permission-mode bypassPermissions${modelFlag}`;
-
-    const proc = spawn(cmd, {
-      shell: true,
-      cwd,
-      env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    proc.stdout?.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    proc.stderr?.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    // Set timeout (unlimited if <= 0)
-    let timer: NodeJS.Timeout | null = null;
-    if (timeoutMs > 0) {
-      timer = setTimeout(() => {
-        proc.kill('SIGKILL');
-        reject(new Error(`Tester timeout after ${timeoutMs}ms`));
-      }, timeoutMs);
-    }
-
-    proc.on('close', (code) => {
-      if (timer) clearTimeout(timer);
-
-      if (code !== 0 && code !== null) {
-        console.error('[Tester] CLI error:', stderr.slice(0, 500));
-        reject(new Error(`Claude CLI failed with code ${code}`));
-        return;
-      }
-
-      resolve(stdout);
-    });
-
-    proc.on('error', (err) => {
-      if (timer) clearTimeout(timer);
-      reject(new Error(`Tester spawn error: ${err.message}`));
-    });
-  });
 }
 
 /**
@@ -225,6 +160,9 @@ function parseTesterOutput(output: string): TesterResult {
         if (event.type === 'result' && event.result) {
           resultText = event.result;
           break;
+        }
+        if (event.type === 'item.completed' && event.item?.type === 'agent_message' && event.item.text) {
+          resultText = event.item.text;
         }
       } catch { /* skip non-JSON lines */ }
     }

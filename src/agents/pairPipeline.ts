@@ -386,6 +386,7 @@ export class PairPipeline extends EventEmitter {
             projectPath: context.projectPath,
             timeoutMs: this.config.roles?.tester?.timeoutMs ?? 0,
             model: this.config.roles?.tester?.model,
+            adapterName: this.config.roles?.tester?.adapter,
           });
           context.testerResult = result as TesterResult;
           break;
@@ -401,6 +402,7 @@ export class PairPipeline extends EventEmitter {
             projectPath: context.projectPath,
             timeoutMs: this.config.roles?.documenter?.timeoutMs ?? 0,
             model: this.config.roles?.documenter?.model,
+            adapterName: this.config.roles?.documenter?.adapter,
           });
           context.documenterResult = result as DocumenterResult;
           break;
@@ -416,6 +418,7 @@ export class PairPipeline extends EventEmitter {
             projectPath: context.projectPath,
             timeoutMs: this.config.roles?.auditor?.timeoutMs ?? 0,
             model: this.config.roles?.auditor?.model,
+            adapterName: this.config.roles?.auditor?.adapter,
           });
           context.auditorResult = result as AuditorResult;
           break;
@@ -431,6 +434,7 @@ export class PairPipeline extends EventEmitter {
             projectPath: context.projectPath,
             timeoutMs: this.config.roles?.['skill-documenter']?.timeoutMs ?? 0,
             model: this.config.roles?.['skill-documenter']?.model,
+            adapterName: this.config.roles?.['skill-documenter']?.adapter,
           });
           context.skillDocumenterResult = result as SkillDocumenterResult;
           break;
