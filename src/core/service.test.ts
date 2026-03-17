@@ -8,6 +8,7 @@ import {
   getAgentStatuses,
   getPRProcessor,
 } from './service.js';
+import { setDefaultAdapter } from '../adapters/index.js';
 
 // Mock external dependencies
 vi.mock('../linear/index.js', () => ({
@@ -48,6 +49,10 @@ vi.mock('../automation/autonomousRunner.js', () => ({
   setLinearFetcher: vi.fn(),
   setDiscordReporter: vi.fn(),
   startAutonomous: vi.fn(async () => ({})),
+}));
+
+vi.mock('../adapters/index.js', () => ({
+  setDefaultAdapter: vi.fn(),
 }));
 
 vi.mock('../automation/prProcessor.js', () => {
@@ -119,6 +124,7 @@ vi.mock('croner', () => ({
 
 describe('service', () => {
   const mockConfig: SwarmConfig = {
+    adapter: 'claude',
     language: 'en',
     discordToken: 'test-token',
     discordChannelId: 'test-channel',
@@ -170,6 +176,7 @@ describe('service', () => {
 
       await startService(mockConfig);
 
+      expect(setDefaultAdapter).toHaveBeenCalledWith('claude');
       expect(initLocale).toHaveBeenCalled();
       expect(initLinear).toHaveBeenCalledWith(
         mockConfig.linearApiKey,

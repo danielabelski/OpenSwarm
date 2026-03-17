@@ -6,7 +6,7 @@
 import { homedir } from 'node:os';
 import type { WorkerResult, ReviewResult } from './agentPair.js';
 import { t, getPrompts } from '../locale/index.js';
-import type { ProcessContext } from '../adapters/types.js';
+import type { AdapterName, ProcessContext } from '../adapters/types.js';
 import { getAdapter, spawnCli } from '../adapters/index.js';
 
 /**
@@ -30,6 +30,7 @@ export interface ReviewerOptions {
   projectPath: string;
   timeoutMs?: number;
   model?: string;              // Claude model (default: claude-sonnet-4-5-20250929)
+  adapterName?: AdapterName;
   processContext?: ProcessContext;
 }
 
@@ -130,7 +131,7 @@ ${options.workerResult.output.slice(0, 2000)}${options.workerResult.output.lengt
 export async function runPreCheck(options: ReviewerOptions): Promise<PreCheckResult> {
   const prompt = buildPreCheckPrompt(options);
   const cwd = expandPath(options.projectPath);
-  const adapter = getAdapter();
+  const adapter = getAdapter(options.adapterName);
 
   try {
     // Use Haiku for fast validation
@@ -138,7 +139,7 @@ export async function runPreCheck(options: ReviewerOptions): Promise<PreCheckRes
       prompt,
       cwd,
       timeoutMs: 30000, // 30 seconds max for pre-check
-      model: 'claude-haiku-4-5-20251001', // Fast model
+      model: options.model,
       processContext: options.processContext,
     });
 
@@ -202,7 +203,7 @@ export async function runPreCheck(options: ReviewerOptions): Promise<PreCheckRes
 export async function runReviewer(options: ReviewerOptions): Promise<ReviewResult> {
   const prompt = buildReviewerPrompt(options);
   const cwd = expandPath(options.projectPath);
-  const adapter = getAdapter();
+  const adapter = getAdapter(options.adapterName);
 
   try {
     // Run CLI via adapter

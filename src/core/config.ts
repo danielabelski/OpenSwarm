@@ -22,6 +22,7 @@ const CONFIG_PATHS = [
 
 const DEFAULT_HEARTBEAT_INTERVAL = 30 * 60 * 1000; // 30 minutes
 const DEFAULT_GITHUB_CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
+const AdapterNameSchema = z.enum(['claude', 'codex']);
 
 // ============================================
 // Zod Schemas
@@ -91,6 +92,8 @@ const ModelConfigSchema = z.object({
 const RoleConfigSchema = z.object({
   /** Whether role is enabled */
   enabled: z.boolean().default(true),
+  /** CLI adapter */
+  adapter: AdapterNameSchema.optional(),
   /** Model ID */
   model: z.string(),
   /** Timeout (ms), 0 = unlimited */
@@ -236,6 +239,7 @@ const CIWorkerConfigSchema = z.object({
 }).optional();
 
 const RawConfigSchema = z.object({
+  adapter: AdapterNameSchema.default('claude'),
   language: z.enum(['en', 'ko']).default('en'),
   discord: DiscordConfigSchema,
   linear: LinearConfigSchema,
@@ -344,6 +348,7 @@ function parseConfigFile(path: string): unknown {
  */
 function transformConfig(raw: RawConfig): SwarmConfig {
   return {
+    adapter: raw.adapter,
     language: raw.language,
     discordToken: raw.discord.token,
     discordChannelId: raw.discord.channelId,
@@ -522,6 +527,9 @@ export function createAgentSession(
 export function generateSampleConfig(): string {
   return `# OpenSwarm Configuration
 # Environment variables use \${VAR_NAME} or \${VAR_NAME:-default} format
+
+# Default CLI adapter for worker/reviewer stages
+adapter: claude
 
 discord:
   token: \${DISCORD_TOKEN}

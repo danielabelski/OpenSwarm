@@ -91,6 +91,8 @@ export type SwarmEvent = {
  * Global configuration
  */
 export type SwarmConfig = {
+  /** Default CLI adapter */
+  adapter?: 'claude' | 'codex';
   /** UI language: 'en' | 'ko' (default: 'en') */
   language: 'en' | 'ko';
   /** Discord bot token */
@@ -253,6 +255,8 @@ export type ModelConfig = {
 export type RoleConfig = {
   /** Whether role is enabled */
   enabled: boolean;
+  /** CLI adapter name */
+  adapter?: 'claude' | 'codex';
   /** Model ID */
   model: string;
   /** Timeout (ms), 0 = unlimited */

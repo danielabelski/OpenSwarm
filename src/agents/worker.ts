@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 import type { WorkerResult } from './agentPair.js';
 import * as gitTracker from '../support/gitTracker.js';
 import { t, getPrompts } from '../locale/index.js';
-import type { ProcessContext } from '../adapters/types.js';
+import type { AdapterName, ProcessContext } from '../adapters/types.js';
 import { getAdapter, spawnCli } from '../adapters/index.js';
 
 /**
@@ -31,6 +31,7 @@ export interface WorkerOptions {
   previousFeedback?: string;   // Previous feedback from Reviewer (for revisions)
   timeoutMs?: number;
   model?: string;              // Claude model (default: claude-sonnet-4-5-20250929)
+  adapterName?: AdapterName;
   issueIdentifier?: string;    // Linear issue ID (e.g., INT-123)
   projectName?: string;        // Linear project name
   onLog?: (line: string) => void;  // Callback for stdout streaming
@@ -63,7 +64,7 @@ function buildWorkerPrompt(options: WorkerOptions): string {
 export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
   const prompt = buildWorkerPrompt(options);
   const cwd = expandPath(options.projectPath);
-  const adapter = getAdapter();
+  const adapter = getAdapter(options.adapterName);
 
   // Git snapshot (pre-work state)
   let snapshotHash = '';

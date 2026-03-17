@@ -21,6 +21,7 @@ import { initLocale, t } from '../locale/index.js';
 import { initRateLimiters, destroyRateLimiters } from '../support/rateLimiter.js';
 import { compactMemoryTable, shouldCompact, cleanupBackupFiles } from '../memory/compaction.js';
 import { Cron } from 'croner';
+import { setDefaultAdapter } from '../adapters/index.js';
 
 let state: ServiceState = {
   running: false,
@@ -48,6 +49,10 @@ export async function startService(config: SwarmConfig): Promise<void> {
 
   // Locale initialization
   initLocale(config.language);
+
+  // Default CLI adapter
+  setDefaultAdapter(config.adapter ?? 'claude');
+  console.log(`🛠️ CLI adapter: ${config.adapter ?? 'claude'}`);
 
   // Rate limiter initialization
   console.log('⚡ Initializing rate limiters...');
