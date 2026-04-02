@@ -443,18 +443,18 @@ Memory types: `belief`, `strategy`, `user_model`, `system_pattern`, `constraint`
 
 Background cognition: decay, consolidation, contradiction detection, and distillation (noise filtering).
 
-## `@openswarm/claude-driver` (npm 패키지)
+## `@intrect/claude-driver` (npm 패키지)
 
 OpenSwarm의 Claude CLI 스폰 + 스트리밍 파싱 로직을 독립 패키지로 추출했습니다. 다른 프로젝트에서 OpenSwarm 없이 바로 사용할 수 있습니다.
 
 ```bash
-npm install @openswarm/claude-driver
+npm install @intrect/claude-driver
 ```
 
 ### 기본 사용법
 
 ```ts
-import { run } from '@openswarm/claude-driver';
+import { run } from '@intrect/claude-driver';
 
 const result = await run({
   prompt: 'Fix the bug in src/app.ts',
@@ -467,7 +467,7 @@ console.log(result.cost);      // "$0.03 | 1.2k in / 800 out | 12.3s"
 ### 어댑터 직접 사용 (mid-level)
 
 ```ts
-import { spawnCli, ClaudeCliAdapter } from '@openswarm/claude-driver';
+import { spawnCli, ClaudeCliAdapter } from '@intrect/claude-driver';
 
 const adapter = new ClaudeCliAdapter();
 const raw = await spawnCli(adapter, {
@@ -484,7 +484,7 @@ import {
   parseCliStreamChunk,
   extractResultFromStreamJson,
   extractCostFromStreamJson,
-} from '@openswarm/claude-driver';
+} from '@intrect/claude-driver';
 ```
 
 ### 공개 API
