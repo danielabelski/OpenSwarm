@@ -3,6 +3,8 @@
 # Copy this file to config.yaml to use
 
 # Default CLI adapter for worker/reviewer stages
+# Options: claude, codex, gpt
+# For GPT: run `openswarm auth login --provider gpt` first
 adapter: claude
 
 discord:
@@ -16,13 +18,13 @@ linear:
 
 github:
   repos:
-    - unohee/OpenSwarm  # owner/repo format
+    - owner/repo  # owner/repo format
   checkInterval: 300000  # 5 minutes (ms)
 
 # Agent list
 agents:
   - name: main
-    projectPath: ~/dev/OpenSwarm
+    projectPath: ~/dev/your-project
     heartbeatInterval: 1800000  # 30 minutes (ms)
     linearLabel: main  # Label for Linear issue filtering
     enabled: true
@@ -40,7 +42,7 @@ autonomous:
   maxConcurrentTasks: 4  # Number of concurrent tasks
 
   allowedProjects:
-    - ~/dev/OpenSwarm
+    - ~/dev/your-project
 
   # Task decomposition settings (Planner Agent)
   decomposition:
