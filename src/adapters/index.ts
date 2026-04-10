@@ -17,15 +17,18 @@ export type {
 export { spawnCli } from './base.js';
 export { ClaudeCliAdapter } from './claude.js';
 export { CodexCliAdapter } from './codex.js';
+export { GptCliAdapter } from './gpt.js';
 export { registerProcess, getProcess, getAllProcesses, killProcess, startHealthChecker, stopHealthChecker } from './processRegistry.js';
 
 import { ClaudeCliAdapter } from './claude.js';
 import { CodexCliAdapter } from './codex.js';
+import { GptCliAdapter } from './gpt.js';
 import type { AdapterName, CliAdapter } from './types.js';
 
 const adapters: Record<string, CliAdapter> = {
   claude: new ClaudeCliAdapter(),
   codex: new CodexCliAdapter(),
+  gpt: new GptCliAdapter(),
 };
 
 let defaultAdapter: AdapterName = 'claude';

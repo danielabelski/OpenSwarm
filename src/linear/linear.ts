@@ -111,6 +111,13 @@ export function initLinear(apiKey: string, team: string): void {
 }
 
 /**
+ * Check if Linear client is initialized
+ */
+export function isLinearInitialized(): boolean {
+  return client !== null;
+}
+
+/**
  * Return the Linear client instance
  */
 export function getClient(): LinearClient {
@@ -126,6 +133,7 @@ export function getClient(): LinearClient {
 export async function getInProgressIssues(
   agentLabel: string
 ): Promise<LinearIssueInfo[]> {
+  if (!isLinearInitialized()) return [];
   // Check cache first
   const cached = inProgressCache.get(agentLabel);
   if (cached && isCacheValid(cached)) {
@@ -191,6 +199,7 @@ export async function getInProgressIssues(
 export async function getNextBacklogIssue(
   agentLabel: string
 ): Promise<LinearIssueInfo | null> {
+  if (!isLinearInitialized()) return null;
   // Check cache first
   const cached = backlogCache.get(agentLabel);
   if (cached && isCacheValid(cached) && cached.data.length > 0) {
@@ -277,6 +286,7 @@ export interface GetMyIssuesOptions {
 export async function getMyIssues(
   agentLabelOrOptions?: string | GetMyIssuesOptions
 ): Promise<LinearIssueInfo[]> {
+  if (!isLinearInitialized()) return [];
   const opts: GetMyIssuesOptions = typeof agentLabelOrOptions === 'string'
     ? { agentLabel: agentLabelOrOptions }
     : agentLabelOrOptions ?? {};
@@ -431,6 +441,7 @@ export async function getMyIssues(
  * Get a specific issue by ID or identifier
  */
 export async function getIssue(issueIdOrIdentifier: string): Promise<LinearIssueInfo | null> {
+  if (!isLinearInitialized()) return null;
   const linear = getClient();
 
   try {
@@ -494,6 +505,7 @@ export async function updateIssueState(
   stateName: 'In Progress' | 'In Review' | 'Done' | 'Backlog' | 'Todo',
   retries = 2
 ): Promise<void> {
+  if (!isLinearInitialized()) return;
   const linear = getClient();
 
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -541,6 +553,7 @@ export async function addComment(
   issueId: string,
   body: string
 ): Promise<void> {
+  if (!isLinearInitialized()) return;
   const linear = getClient();
 
   await linear.createComment({
@@ -857,6 +870,7 @@ export async function createIssue(
   labels: string[] = [],
   options?: { bypassLimit?: boolean }
 ): Promise<LinearIssueInfo | { error: string }> {
+  if (!isLinearInitialized()) return { error: 'Linear not configured' };
   resetDailyCounterIfNeeded();
 
   // Check daily limit (unless bypassLimit is set)
@@ -921,6 +935,7 @@ export async function createSubIssue(
     estimatedMinutes?: number;
   }
 ): Promise<LinearIssueInfo | { error: string }> {
+  if (!isLinearInitialized()) return { error: 'Linear not configured' };
   const linear = getClient();
 
   try {
@@ -1045,6 +1060,7 @@ export async function proposeWork(
   rationale: string,
   suggestedApproach?: string
 ): Promise<LinearIssueInfo | { error: string }> {
+  if (!isLinearInitialized()) return { error: 'Linear not configured' };
   resetDailyCounterIfNeeded();
 
   // Check daily limit
@@ -1127,6 +1143,9 @@ export async function getStuckIssues(): Promise<{
   stuckIssues: Array<LinearIssueInfo & { stuckDays: number; reason: string }>;
   failedIssues: Array<LinearIssueInfo & { reason: string }>;
 }> {
+  if (!isLinearInitialized()) {
+    return { stuckIssues: [], failedIssues: [] };
+  }
   const linear = getClient();
   const now = Date.now();
   const STUCK_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days

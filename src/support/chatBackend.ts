@@ -36,17 +36,25 @@ export const CHAT_MODEL_ALIASES: Record<AdapterName, Record<string, string>> = {
     gpt5: 'gpt-5-codex',
     gpt5codex: 'gpt-5-codex',
   },
+  gpt: {
+    'gpt-4o': 'gpt-4o',
+    'o3': 'o3',
+    'o4-mini': 'o4-mini',
+    'gpt-4.1': 'gpt-4.1',
+  },
 };
 
 export function inferProviderFromModel(model?: string): AdapterName {
   if (!model) return getDefaultAdapterName();
-  return model.startsWith('gpt-') || model.includes('codex') ? 'codex' : 'claude';
+  if (model.includes('codex')) return 'codex';
+  if (model.startsWith('gpt-') || model.startsWith('o3') || model.startsWith('o4')) return 'gpt';
+  return 'claude';
 }
 
 export function getDefaultChatModel(provider: AdapterName): string {
-  return provider === 'codex'
-    ? 'gpt-5-codex'
-    : 'claude-sonnet-4-5-20250929';
+  if (provider === 'codex') return 'gpt-5-codex';
+  if (provider === 'gpt') return 'gpt-4o';
+  return 'claude-sonnet-4-5-20250929';
 }
 
 export function resolveChatModel(input: string | undefined, provider: AdapterName): string {

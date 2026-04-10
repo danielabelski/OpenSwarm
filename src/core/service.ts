@@ -60,15 +60,23 @@ export async function startService(config: SwarmConfig): Promise<void> {
   initRateLimiters();
   console.log('✅ Rate limiters ready');
 
-  // Linear initialization
-  console.log('🔗 Initializing Linear client...');
-  linear.initLinear(config.linearApiKey, config.linearTeamId);
-  console.log('✅ Linear client connected');
+  // Linear initialization (optional)
+  if (config.linearApiKey && config.linearTeamId) {
+    console.log('🔗 Initializing Linear client...');
+    linear.initLinear(config.linearApiKey, config.linearTeamId);
+    console.log('✅ Linear client connected');
+  } else {
+    console.log('⏭ Linear not configured — skipping');
+  }
 
-  // Discord initialization
-  console.log('🤖 Connecting Discord bot...');
-  await discord.initDiscord(config.discordToken, config.discordChannelId);
-  console.log('✅ Discord bot connected successfully');
+  // Discord initialization (optional)
+  if (config.discordToken && config.discordChannelId) {
+    console.log('🤖 Connecting Discord bot...');
+    await discord.initDiscord(config.discordToken, config.discordChannelId);
+    console.log('✅ Discord bot connected successfully');
+  } else {
+    console.log('⏭ Discord not configured — skipping');
+  }
 
   // Start web interface
   console.log('🌐 Starting web interface...');

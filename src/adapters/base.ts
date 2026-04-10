@@ -18,6 +18,11 @@ export async function spawnCli(
   adapter: CliAdapter,
   options: CliRunOptions,
 ): Promise<CliRunResult> {
+  // 어댑터가 직접 실행을 지원하면 shell spawn 대신 사용
+  if (adapter.run) {
+    return adapter.run(options);
+  }
+
   const promptFile = `/tmp/openswarm-prompt-${Date.now()}.txt`;
   await fs.writeFile(promptFile, options.prompt);
 

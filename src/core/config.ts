@@ -20,7 +20,7 @@ const CONFIG_PATHS = [
 
 const DEFAULT_HEARTBEAT_INTERVAL = 30 * 60 * 1000; // 30 minutes
 const DEFAULT_GITHUB_CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
-const AdapterNameSchema = z.enum(['claude', 'codex']);
+const AdapterNameSchema = z.enum(['claude', 'codex', 'gpt']);
 
 // Zod Schemas
 
@@ -37,12 +37,12 @@ const DiscordConfigSchema = z.object({
   token: z.string().min(1, 'Discord token is required'),
   channelId: z.string().min(1, 'Discord channel ID is required'),
   webhookUrl: z.string().optional(),
-});
+}).optional();
 
 const LinearConfigSchema = z.object({
   apiKey: z.string().min(1, 'Linear API key is required'),
   teamId: z.string().min(1, 'Linear team ID is required'),
-});
+}).optional();
 
 const GitHubConfigSchema = z.object({
   repos: z.array(z.string()).default([]),
@@ -362,11 +362,11 @@ function transformConfig(raw: RawConfig): SwarmConfig {
   return {
     adapter: raw.adapter,
     language: raw.language,
-    discordToken: raw.discord.token,
-    discordChannelId: raw.discord.channelId,
-    discordWebhookUrl: raw.discord.webhookUrl,
-    linearApiKey: raw.linear.apiKey,
-    linearTeamId: raw.linear.teamId,
+    discordToken: raw.discord?.token ?? '',
+    discordChannelId: raw.discord?.channelId ?? '',
+    discordWebhookUrl: raw.discord?.webhookUrl,
+    linearApiKey: raw.linear?.apiKey ?? '',
+    linearTeamId: raw.linear?.teamId ?? '',
     agents: raw.agents.map(agent => ({
       ...agent,
       projectPath: expandPath(agent.projectPath),
@@ -465,7 +465,19 @@ export function loadConfig(customPath?: string): SwarmConfig {
   }
 
   // 3. Substitute environment variables
-  const substituted = substituteEnvVarsDeep(rawData);
+  const substituted = substituteEnvVarsDeep(rawData) as Record<string, unknown>;
+
+  // 3.5. Optional 블록 정리: 환경변수 미설정 시 빈 문자열이 들어온 블록 제거
+  const discordBlock = substituted.discord as Record<string, unknown> | undefined;
+  if (discordBlock && (!discordBlock.token || !discordBlock.channelId)) {
+    console.log('[Config] Discord credentials not set — disabling Discord integration');
+    delete substituted.discord;
+  }
+  const linearBlock = substituted.linear as Record<string, unknown> | undefined;
+  if (linearBlock && (!linearBlock.apiKey || !linearBlock.teamId)) {
+    console.log('[Config] Linear credentials not set — disabling Linear integration');
+    delete substituted.linear;
+  }
 
   // 4. Zod schema validation
   const parseResult = RawConfigSchema.safeParse(substituted);
@@ -543,6 +555,8 @@ export function generateSampleConfig(): string {
 # Environment variables use \${VAR_NAME} or \${VAR_NAME:-default} format
 
 # Default CLI adapter for worker/reviewer stages
+# Options: claude, codex, gpt
+# For GPT: run \`openswarm auth login --provider gpt\` first
 adapter: claude
 
 discord:

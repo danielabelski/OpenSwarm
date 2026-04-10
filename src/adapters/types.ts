@@ -8,7 +8,7 @@ import type { WorkerResult, ReviewResult } from '../agents/agentPair.js';
 // Re-export for convenience
 export type { WorkerResult, ReviewResult };
 
-export type AdapterName = 'claude' | 'codex';
+export type AdapterName = 'claude' | 'codex' | 'gpt';
 
 /**
  * Raw result from a CLI process execution
@@ -74,6 +74,12 @@ export interface CliAdapter {
     onLog: (line: string) => void,
     buffer?: string,
   ): string;
+
+  /**
+   * Optional direct execution (bypasses spawnCli shell spawn).
+   * Used by adapters that call APIs directly instead of spawning a CLI process.
+   */
+  run?(options: CliRunOptions): Promise<CliRunResult>;
 
   /** Parse raw CLI output into a WorkerResult */
   parseWorkerOutput(raw: CliRunResult): WorkerResult;
