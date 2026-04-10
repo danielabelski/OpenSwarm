@@ -784,7 +784,25 @@ export class PairPipeline extends EventEmitter {
       // ========== REVIEWER ==========
       if (hasReviewer) {
         agentPair.updateSessionStatus(context.session.id, 'reviewing');
-        const reviewerResult = await this.runStage('reviewer', context);
+
+        // Reviewer escalation: 로컬 모델이 N회 이상 REVISE → 상위 모델로 spot check
+        const reviewerCfg = this.config.roles?.reviewer;
+        const reviewerEscalateModel = reviewerCfg?.escalateModel;
+        const reviewerEscalateThreshold = reviewerCfg?.escalateAfterIteration ?? 3;
+        const shouldEscalateReviewer = context.currentIteration >= reviewerEscalateThreshold && !!reviewerEscalateModel;
+
+        const reviewerOverrides = shouldEscalateReviewer
+          ? { model: reviewerEscalateModel }
+          : undefined;
+
+        if (shouldEscalateReviewer && reviewerEscalateModel) {
+          console.log(`[${context.taskPrefix}] Reviewer escalation → ${reviewerEscalateModel} (iteration ${context.currentIteration})`);
+          this.emit('log', {
+            line: `🔍 Reviewer spot check: escalating to ${reviewerEscalateModel}`,
+          });
+        }
+
+        const reviewerResult = await this.runStage('reviewer', context, reviewerOverrides);
         stages.push(reviewerResult);
 
         const decision = (reviewerResult.result as ReviewResult).decision;

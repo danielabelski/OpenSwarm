@@ -65,6 +65,8 @@ autonomous:
       enabled: true
       adapter: local                          # Local model — free, 7s response
       model: gemma-4-e4b-it                   # Gemma 4 e4b via LMStudio
+      escalateModel: claude-sonnet-4-20250514 # Spot check: Sonnet reviews after N revisions
+      escalateAfterIteration: 3               # Escalate from 3rd iteration
       timeoutMs: 60000    # 1 minute (local models are slower)
     tester:
       enabled: false
