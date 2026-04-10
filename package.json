@@ -1,6 +1,6 @@
 {
   "name": "@intrect/openswarm",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Autonomous Claude Code agents orchestrator with Discord control and Linear memory",
   "type": "module",
   "main": "dist/index.js",
