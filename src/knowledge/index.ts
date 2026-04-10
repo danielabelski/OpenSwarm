@@ -232,7 +232,9 @@ export async function saveGraphInsights(projectPath: string): Promise<void> {
         `[${slug}] Frequently changed modules: ${hotList}. Watch for change impact.`,
         { confidence: 0.8, importance: 0.6, derivedFrom: `knowledge-graph:${slug}` }
       );
-    } catch {}
+    } catch (err) {
+      console.warn(`[Knowledge] 메모리 저장 실패 (hot modules):`, err instanceof Error ? err.message : err);
+    }
   }
 
   // High risk modules insight
@@ -244,7 +246,9 @@ export async function saveGraphInsights(projectPath: string): Promise<void> {
         `[${slug}] High-risk modules (no tests + high churn): ${riskList}. Adding tests recommended.`,
         { confidence: 0.85, importance: 0.7, derivedFrom: `knowledge-graph:${slug}` }
       );
-    } catch {}
+    } catch (err) {
+      console.warn(`[Knowledge] 메모리 저장 실패 (high risk):`, err instanceof Error ? err.message : err);
+    }
   }
 
   // Test coverage insight
@@ -255,7 +259,9 @@ export async function saveGraphInsights(projectPath: string): Promise<void> {
         `[${slug}] Test coverage: ${coverage}% (${summary.totalTestFiles} tests / ${summary.totalModules} modules). ${summary.untestedModules.length} untested.`,
         { confidence: 0.9, importance: 0.5, derivedFrom: `knowledge-graph:${slug}` }
       );
-    } catch {}
+    } catch (err) {
+      console.warn(`[Knowledge] 메모리 저장 실패 (coverage):`, err instanceof Error ? err.message : err);
+    }
   }
 }
 

@@ -27,6 +27,8 @@ import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineStage, RoleConfig } from '../core/types.js';
 import { initLocale } from '../locale/index.js';
 import { runChatCompletion, getDefaultChatModel } from './chatBackend.js';
+import { handleGraphQL, isGraphQLRequest } from '../issues/graphql/server.js';
+import { ISSUE_BOARD_HTML } from '../issues/issueBoardHtml.js';
 
 let server: ReturnType<typeof createServer> | null = null;
 let runnerRef: AutonomousRunner | undefined;
@@ -67,7 +69,9 @@ function loadReposConfig(): ReposConfig {
     if (existsSync(REPOS_FILE)) {
       return JSON.parse(readFileSync(REPOS_FILE, 'utf-8')) as ReposConfig;
     }
-  } catch {}
+  } catch (err) {
+    console.warn(`[Web] repos config 로드 실패:`, err instanceof Error ? err.message : err);
+  }
   return { pinned: [], enabled: [], basePaths: [], removedConfigPaths: [] };
 }
 
@@ -146,8 +150,17 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE');
       }
 
+      // ---- GraphQL API (이슈 트래커) ----
+      if (isGraphQLRequest(req.url)) {
+        await handleGraphQL(req, res);
+
+      // ---- Issue Board ----
+      } else if (url === '/issues') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(ISSUE_BOARD_HTML);
+
       // ---- Dashboard ----
-      if (url === '/' || url === '/index.html') {
+      } else if (url === '/' || url === '/index.html') {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(DASHBOARD_HTML);
 

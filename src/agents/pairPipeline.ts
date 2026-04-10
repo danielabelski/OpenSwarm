@@ -667,19 +667,20 @@ export class PairPipeline extends EventEmitter {
       // ========== WORKER (with escalation) ==========
       const workerCfg = this.config.roles?.worker;
       const escalateThreshold = workerCfg?.escalateAfterIteration ?? 3;
-      const shouldEscalate = context.currentIteration >= escalateThreshold && !!workerCfg?.escalateModel;
+      const escalateModel = workerCfg?.escalateModel;
+      const shouldEscalate = context.currentIteration >= escalateThreshold && !!escalateModel;
       const baseWorkerModel = this.getModelForRole('worker', context.task);
       const workerOverrides = shouldEscalate
-        ? { model: workerCfg!.escalateModel! }
+        ? { model: escalateModel }
         : (baseWorkerModel ? { model: baseWorkerModel } : undefined);
 
-      if (shouldEscalate) {
-        console.log(`[${context.taskPrefix}] Escalating worker model → ${workerCfg!.escalateModel} (iteration ${context.currentIteration})`);
+      if (shouldEscalate && escalateModel) {
+        console.log(`[${context.taskPrefix}] Escalating worker model → ${escalateModel} (iteration ${context.currentIteration})`);
         broadcastEvent({ type: 'pipeline:escalation', data: {
           taskId: context.task.id,
           iteration: context.currentIteration,
           fromModel: workerCfg?.model,
-          toModel: workerCfg!.escalateModel!,
+          toModel: escalateModel,
         } });
       }
 
