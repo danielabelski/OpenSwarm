@@ -6,7 +6,7 @@
 // ============================================
 
 import { getAdapter, spawnCli } from '../adapters/index.js';
-import { analyzeIssue, getGraph, toProjectSlug } from '../knowledge/index.js';
+import { analyzeIssue } from '../knowledge/index.js';
 import { getRegistryStore } from '../registry/sqliteStore.js';
 import type { ImpactAnalysis } from '../knowledge/types.js';
 
