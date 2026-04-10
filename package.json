@@ -1,7 +1,8 @@
 {
   "name": "@intrect/openswarm",
   "version": "0.3.0",
-  "description": "Autonomous Claude Code agents orchestrator with Discord control and Linear memory",
+  "description": "Autonomous AI agent orchestrator — Claude, GPT, Codex, and local models (Ollama/LMStudio/llama.cpp)",
+  "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
