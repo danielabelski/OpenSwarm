@@ -63,10 +63,25 @@ Apply the above feedback and make corrections.
 `
       : '';
 
-    // 코드 컨텍스트 섹션 (impactAnalysis + registryBriefs)
+    // 코드 컨텍스트 섹션 (draftAnalysis + impactAnalysis + registryBriefs)
     let contextSection = '';
-    if (context?.impactAnalysis || context?.registryBriefs?.length) {
+    if (context?.draftAnalysis || context?.impactAnalysis || context?.registryBriefs?.length) {
       const parts: string[] = ['## Code Context (auto-generated)'];
+
+      if (context.draftAnalysis) {
+        const da = context.draftAnalysis;
+        parts.push('');
+        parts.push('### Pre-Analysis (Draft)');
+        parts.push(`- **Task type:** ${da.taskType}`);
+        parts.push(`- **Intent:** ${da.intentSummary}`);
+        parts.push(`- **Approach:** ${da.suggestedApproach}`);
+        if (da.relevantFiles.length > 0) {
+          parts.push(`- **Likely files:** ${da.relevantFiles.join(', ')}`);
+        }
+        if (da.projectStats) {
+          parts.push(`- **Project health:** ${da.projectStats}`);
+        }
+      }
 
       if (context.impactAnalysis) {
         const ia = context.impactAnalysis;
@@ -234,7 +249,16 @@ After review, output results in the following JSON format:
     return lines.join('\n');
   },
 
-  buildPlannerPrompt({ taskTitle, taskDescription, projectName, targetMinutes, impactAnalysis }) {
+  buildPlannerPrompt({ taskTitle, taskDescription, projectName, targetMinutes, impactAnalysis, draftAnalysis }) {
+    const draftSection = draftAnalysis ? `
+## Pre-Analysis (Draft — by fast model)
+- **Task type:** ${draftAnalysis.taskType}
+- **Intent:** ${draftAnalysis.intentSummary}
+- **Suggested approach:** ${draftAnalysis.suggestedApproach}
+${draftAnalysis.relevantFiles.length > 0 ? `- **Likely files:** ${draftAnalysis.relevantFiles.join(', ')}` : ''}
+${draftAnalysis.projectStats ? `- **Project health:** ${draftAnalysis.projectStats}` : ''}
+` : '';
+
     const kgSection = impactAnalysis ? `
 ## Knowledge Graph — Affected Modules
 The following modules are identified by the Knowledge Graph as being affected by this task:
@@ -256,7 +280,7 @@ The following modules are identified by the Knowledge Graph as being affected by
 - **Title:** ${taskTitle}
 - **Description:** ${taskDescription}
 - **Project:** ${projectName}
-${kgSection}
+${draftSection}${kgSection}
 ## Your Mission
 Analyze this task and decompose it into units completable within ${targetMinutes} minutes.
 

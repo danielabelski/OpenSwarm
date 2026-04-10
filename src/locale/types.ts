@@ -403,6 +403,14 @@ export interface WorkerContext {
     summary: string;  // "5 entities, 1 deprecated, 2 untested"
     highlights: string[];  // deprecated/broken/critical warning 엔티티명
   }>;
+  /** Draft Analyzer 사전 분석 결과 (Haiku) */
+  draftAnalysis?: {
+    taskType: string;
+    intentSummary: string;
+    relevantFiles: string[];
+    suggestedApproach: string;
+    projectStats?: string;
+  };
 }
 
 export interface PromptTemplates {
@@ -434,6 +442,13 @@ export interface PromptTemplates {
       dependentModules: string[];
       testFiles: string[];
       estimatedScope: 'small' | 'medium' | 'large';
+    };
+    draftAnalysis?: {
+      taskType: string;
+      intentSummary: string;
+      relevantFiles: string[];
+      suggestedApproach: string;
+      projectStats?: string;
     };
   }) => string;
 }

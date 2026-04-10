@@ -64,10 +64,25 @@ ${previousFeedback}
 `
       : '';
 
-    // 코드 컨텍스트 섹션
+    // 코드 컨텍스트 섹션 (draftAnalysis + impactAnalysis + registryBriefs)
     let contextSection = '';
-    if (context?.impactAnalysis || context?.registryBriefs?.length) {
+    if (context?.draftAnalysis || context?.impactAnalysis || context?.registryBriefs?.length) {
       const parts: string[] = ['## 코드 컨텍스트 (자동 생성)'];
+
+      if (context.draftAnalysis) {
+        const da = context.draftAnalysis;
+        parts.push('');
+        parts.push('### 사전 분석 (Draft)');
+        parts.push(`- **작업 유형:** ${da.taskType}`);
+        parts.push(`- **의도:** ${da.intentSummary}`);
+        parts.push(`- **접근 방식:** ${da.suggestedApproach}`);
+        if (da.relevantFiles.length > 0) {
+          parts.push(`- **관련 파일:** ${da.relevantFiles.join(', ')}`);
+        }
+        if (da.projectStats) {
+          parts.push(`- **프로젝트 상태:** ${da.projectStats}`);
+        }
+      }
 
       if (context.impactAnalysis) {
         const ia = context.impactAnalysis;
@@ -235,7 +250,16 @@ ${workerReport}
     return lines.join('\n');
   },
 
-  buildPlannerPrompt({ taskTitle, taskDescription, projectName, targetMinutes, impactAnalysis }) {
+  buildPlannerPrompt({ taskTitle, taskDescription, projectName, targetMinutes, impactAnalysis, draftAnalysis }) {
+    const draftSection = draftAnalysis ? `
+## 사전 분석 (Draft — 경량 모델)
+- **작업 유형:** ${draftAnalysis.taskType}
+- **의도:** ${draftAnalysis.intentSummary}
+- **접근 방식:** ${draftAnalysis.suggestedApproach}
+${draftAnalysis.relevantFiles.length > 0 ? `- **관련 파일:** ${draftAnalysis.relevantFiles.join(', ')}` : ''}
+${draftAnalysis.projectStats ? `- **프로젝트 상태:** ${draftAnalysis.projectStats}` : ''}
+` : '';
+
     const kgSection = impactAnalysis ? `
 ## Knowledge Graph — 영향 모듈
 Knowledge Graph가 이 작업에 의해 영향받는 것으로 식별한 모듈:
@@ -257,7 +281,7 @@ Knowledge Graph가 이 작업에 의해 영향받는 것으로 식별한 모듈:
 - **Title:** ${taskTitle}
 - **Description:** ${taskDescription}
 - **Project:** ${projectName}
-${kgSection}
+${draftSection}${kgSection}
 ## Your Mission
 이 작업을 분석하고, ${targetMinutes}분 이내에 완료할 수 있는 단위로 분해하라.
 

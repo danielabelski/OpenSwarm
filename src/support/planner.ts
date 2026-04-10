@@ -22,6 +22,14 @@ export interface PlannerOptions {
   targetMinutes?: number;  // Target time per sub-task (default 25 min)
   onLog?: (line: string) => void;  // Stream planner stdout to dashboard
   impactAnalysis?: ImpactAnalysis;  // KG 영향 분석 (파일 분리 유도)
+  /** Draft Analyzer 결과 (Haiku 사전 분석) */
+  draftAnalysis?: {
+    taskType: string;
+    intentSummary: string;
+    relevantFiles: string[];
+    suggestedApproach: string;
+    projectStats?: string;
+  };
 }
 
 export interface SubTask {
@@ -52,6 +60,7 @@ function buildPlannerPrompt(options: PlannerOptions): string {
     projectName: options.projectName || options.projectPath,
     targetMinutes: options.targetMinutes ?? 25,
     impactAnalysis: options.impactAnalysis ?? undefined,
+    draftAnalysis: options.draftAnalysis,
   });
 }
 

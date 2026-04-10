@@ -58,6 +58,16 @@ export interface PipelineConfig {
   skipAuditorUnderFileCount?: number;
   /** Enable verbose logging (detailed stage info, agent decisions, timing) */
   verbose?: boolean;
+  /** Draft Analyzer 사전 분석 결과 (Haiku) — Worker/Planner에 주입 */
+  draftAnalysis?: {
+    taskType: string;
+    intentSummary: string;
+    relevantFiles: string[];
+    suggestedApproach: string;
+    projectStats?: string;
+    impactAnalysis?: import('../knowledge/types.js').ImpactAnalysis;
+    registrySnapshot?: Array<{ filePath: string; summary: string; highlights: string[] }>;
+  };
 }
 
 export interface StageResult {
@@ -319,68 +329,81 @@ export class PairPipeline extends EventEmitter {
 
   /**
    * Worker에 주입할 코드 컨텍스트 수집
-   * - Knowledge Graph: 영향 범위 분석
-   * - Code Registry: 변경 대상 파일의 entity 상태
-   * 실패 시 null 반환 (non-blocking)
+   * Draft 분석이 있으면 재사용, 없으면 직접 수집
    */
   private async collectWorkerContext(context: PipelineContext): Promise<WorkerContext | undefined> {
     try {
       const wc: WorkerContext = {};
+      const draft = this.config.draftAnalysis;
 
-      // 1. Knowledge Graph — 영향 분석
-      const impact = await analyzeIssue(
-        context.projectPath,
-        context.task.title,
-        context.task.description || '',
-      );
-      if (impact && (impact.directModules.length > 0 || impact.dependentModules.length > 0)) {
-        wc.impactAnalysis = impact;
-      }
+      // Draft 분석 결과가 있으면 우선 사용 (중복 API 호출 방지)
+      if (draft) {
+        wc.draftAnalysis = {
+          taskType: draft.taskType,
+          intentSummary: draft.intentSummary,
+          relevantFiles: draft.relevantFiles,
+          suggestedApproach: draft.suggestedApproach,
+          projectStats: draft.projectStats,
+        };
 
-      // 2. Code Registry — 영향받는 파일의 entity 상태
-      const affectedFiles = new Set<string>();
-      if (impact) {
-        // directModules는 모듈 ID (보통 파일 경로)
-        for (const mod of impact.directModules) affectedFiles.add(mod);
-        // dependentModules 중 상위 5개만 (프롬프트 길이 제한)
-        for (const mod of impact.dependentModules.slice(0, 5)) affectedFiles.add(mod);
-      }
-
-      if (affectedFiles.size > 0) {
-        try {
-          const store = getRegistryStore();
-          const briefs: WorkerContext['registryBriefs'] = [];
-
-          for (const filePath of affectedFiles) {
-            const brief = store.fileBrief(filePath);
-            if (brief.entities.length === 0) continue;
-
-            // deprecated, broken, critical warning 엔티티만 하이라이트
-            const highlights: string[] = [];
-            for (const e of brief.entities) {
-              if (e.status === 'deprecated') highlights.push(`${e.name} (deprecated)`);
-              else if (e.status === 'broken') highlights.push(`${e.name} (broken)`);
-              const critical = e.warnings.filter(w => !w.resolved && w.severity === 'critical');
-              if (critical.length > 0) highlights.push(`${e.name} (${critical.length} critical)`);
-            }
-
-            briefs.push({
-              filePath: brief.filePath,
-              summary: brief.summary,
-              highlights,
-            });
-          }
-
-          if (briefs.length > 0) {
-            wc.registryBriefs = briefs;
-          }
-        } catch {
-          // Registry가 초기화 안 된 경우 무시
+        if (draft.impactAnalysis) {
+          wc.impactAnalysis = draft.impactAnalysis;
+        }
+        if (draft.registrySnapshot && draft.registrySnapshot.length > 0) {
+          wc.registryBriefs = draft.registrySnapshot;
         }
       }
 
-      // 아무 컨텍스트도 없으면 undefined
-      if (!wc.impactAnalysis && !wc.registryBriefs) return undefined;
+      // Draft에 impactAnalysis가 없으면 직접 수집
+      if (!wc.impactAnalysis) {
+        const impact = await analyzeIssue(
+          context.projectPath,
+          context.task.title,
+          context.task.description || '',
+        );
+        if (impact && (impact.directModules.length > 0 || impact.dependentModules.length > 0)) {
+          wc.impactAnalysis = impact;
+        }
+      }
+
+      // Draft에 registryBriefs가 없으면 직접 수집
+      if (!wc.registryBriefs) {
+        const affectedFiles = new Set<string>();
+        if (wc.impactAnalysis) {
+          for (const mod of wc.impactAnalysis.directModules) affectedFiles.add(mod);
+          for (const mod of wc.impactAnalysis.dependentModules.slice(0, 5)) affectedFiles.add(mod);
+        }
+
+        if (affectedFiles.size > 0) {
+          try {
+            const store = getRegistryStore();
+            const briefs: WorkerContext['registryBriefs'] = [];
+
+            for (const filePath of affectedFiles) {
+              const brief = store.fileBrief(filePath);
+              if (brief.entities.length === 0) continue;
+
+              const highlights: string[] = [];
+              for (const e of brief.entities) {
+                if (e.status === 'deprecated') highlights.push(`${e.name} (deprecated)`);
+                else if (e.status === 'broken') highlights.push(`${e.name} (broken)`);
+                const critical = e.warnings.filter(w => !w.resolved && w.severity === 'critical');
+                if (critical.length > 0) highlights.push(`${e.name} (${critical.length} critical)`);
+              }
+
+              briefs.push({ filePath: brief.filePath, summary: brief.summary, highlights });
+            }
+
+            if (briefs.length > 0) {
+              wc.registryBriefs = briefs;
+            }
+          } catch {
+            // Registry 미초기화
+          }
+        }
+      }
+
+      if (!wc.impactAnalysis && !wc.registryBriefs && !wc.draftAnalysis) return undefined;
       return wc;
     } catch (err) {
       console.warn('[Pipeline] Worker context collection failed (non-blocking):', err);
@@ -1077,6 +1100,7 @@ export function createPipelineFromConfig(
   maxIterations = 3,
   guards?: Partial<PipelineGuardsConfig>,
   jobProfiles?: JobProfile[],
+  draftAnalysis?: PipelineConfig['draftAnalysis'],
 ): PairPipeline {
   const stages: PipelineStage[] = [];
 
@@ -1105,6 +1129,7 @@ export function createPipelineFromConfig(
     roles,
     guards,
     jobProfiles,
+    draftAnalysis,
   });
 }
 
