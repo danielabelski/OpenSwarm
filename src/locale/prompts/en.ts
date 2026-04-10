@@ -54,7 +54,7 @@ Never execute these under any circumstances:
 If file deletion is needed, use trash or mv to a backup folder.
 `,
 
-  buildWorkerPrompt({ taskTitle, taskDescription, previousFeedback }) {
+  buildWorkerPrompt({ taskTitle, taskDescription, previousFeedback, context }) {
     const feedbackSection = previousFeedback
       ? `\n## Previous Feedback (Revision Required)
 ${previousFeedback}
@@ -63,12 +63,46 @@ Apply the above feedback and make corrections.
 `
       : '';
 
+    // 코드 컨텍스트 섹션 (impactAnalysis + registryBriefs)
+    let contextSection = '';
+    if (context?.impactAnalysis || context?.registryBriefs?.length) {
+      const parts: string[] = ['## Code Context (auto-generated)'];
+
+      if (context.impactAnalysis) {
+        const ia = context.impactAnalysis;
+        parts.push('');
+        parts.push('### Affected Modules');
+        parts.push(`- **Direct:** ${ia.directModules.join(', ') || 'none identified'}`);
+        if (ia.dependentModules.length > 0) {
+          parts.push(`- **Dependents:** ${ia.dependentModules.join(', ')}`);
+        }
+        if (ia.testFiles.length > 0) {
+          parts.push(`- **Test files to run:** ${ia.testFiles.join(', ')}`);
+        }
+        parts.push(`- **Estimated scope:** ${ia.estimatedScope}`);
+      }
+
+      if (context.registryBriefs && context.registryBriefs.length > 0) {
+        parts.push('');
+        parts.push('### File Health (from Code Registry)');
+        for (const brief of context.registryBriefs) {
+          parts.push(`- \`${brief.filePath}\`: ${brief.summary}`);
+          if (brief.highlights.length > 0) {
+            parts.push(`  ⚠️ ${brief.highlights.join(', ')}`);
+          }
+        }
+      }
+
+      parts.push('');
+      contextSection = parts.join('\n') + '\n';
+    }
+
     return `# Worker Agent
 
 ## Task
 - **Title:** ${taskTitle}
 - **Description:** ${taskDescription}
-${feedbackSection}
+${feedbackSection}${contextSection}
 ## Instructions
 1. Perform the task and report results
 2. List all changed files

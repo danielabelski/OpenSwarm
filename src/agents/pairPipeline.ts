@@ -17,7 +17,9 @@ import { broadcastEvent } from '../core/eventHub.js';
 import { CONFIDENCE_THRESHOLDS } from './agentPair.js';
 import * as agentPair from './agentPair.js';
 import { runGuards, type GuardsRunResult } from './pipelineGuards.js';
-import { hasRepoSnapshot, scanAndCache } from '../knowledge/index.js';
+import { hasRepoSnapshot, scanAndCache, analyzeIssue } from '../knowledge/index.js';
+import { getRegistryStore } from '../registry/sqliteStore.js';
+import type { WorkerContext } from '../locale/types.js';
 import * as workerAgent from './worker.js';
 import * as reviewerAgent from './reviewer.js';
 import * as testerAgent from './tester.js';
@@ -316,6 +318,77 @@ export class PairPipeline extends EventEmitter {
   // ============================================
 
   /**
+   * Worker에 주입할 코드 컨텍스트 수집
+   * - Knowledge Graph: 영향 범위 분석
+   * - Code Registry: 변경 대상 파일의 entity 상태
+   * 실패 시 null 반환 (non-blocking)
+   */
+  private async collectWorkerContext(context: PipelineContext): Promise<WorkerContext | undefined> {
+    try {
+      const wc: WorkerContext = {};
+
+      // 1. Knowledge Graph — 영향 분석
+      const impact = await analyzeIssue(
+        context.projectPath,
+        context.task.title,
+        context.task.description || '',
+      );
+      if (impact && (impact.directModules.length > 0 || impact.dependentModules.length > 0)) {
+        wc.impactAnalysis = impact;
+      }
+
+      // 2. Code Registry — 영향받는 파일의 entity 상태
+      const affectedFiles = new Set<string>();
+      if (impact) {
+        // directModules는 모듈 ID (보통 파일 경로)
+        for (const mod of impact.directModules) affectedFiles.add(mod);
+        // dependentModules 중 상위 5개만 (프롬프트 길이 제한)
+        for (const mod of impact.dependentModules.slice(0, 5)) affectedFiles.add(mod);
+      }
+
+      if (affectedFiles.size > 0) {
+        try {
+          const store = getRegistryStore();
+          const briefs: WorkerContext['registryBriefs'] = [];
+
+          for (const filePath of affectedFiles) {
+            const brief = store.fileBrief(filePath);
+            if (brief.entities.length === 0) continue;
+
+            // deprecated, broken, critical warning 엔티티만 하이라이트
+            const highlights: string[] = [];
+            for (const e of brief.entities) {
+              if (e.status === 'deprecated') highlights.push(`${e.name} (deprecated)`);
+              else if (e.status === 'broken') highlights.push(`${e.name} (broken)`);
+              const critical = e.warnings.filter(w => !w.resolved && w.severity === 'critical');
+              if (critical.length > 0) highlights.push(`${e.name} (${critical.length} critical)`);
+            }
+
+            briefs.push({
+              filePath: brief.filePath,
+              summary: brief.summary,
+              highlights,
+            });
+          }
+
+          if (briefs.length > 0) {
+            wc.registryBriefs = briefs;
+          }
+        } catch {
+          // Registry가 초기화 안 된 경우 무시
+        }
+      }
+
+      // 아무 컨텍스트도 없으면 undefined
+      if (!wc.impactAnalysis && !wc.registryBriefs) return undefined;
+      return wc;
+    } catch (err) {
+      console.warn('[Pipeline] Worker context collection failed (non-blocking):', err);
+      return undefined;
+    }
+  }
+
+  /**
    * Check if a stage is enabled
    */
   private hasStage(stage: PipelineStage): boolean {
@@ -359,6 +432,15 @@ export class PairPipeline extends EventEmitter {
             onLog('🔄 Using fresh context (previous attempts failed)');
           }
 
+          // 코드 컨텍스트 수집 (첫 시도 정확도 향상 목적)
+          const workerContext = await this.collectWorkerContext(context);
+          if (workerContext && this.config.verbose) {
+            const modCount = (workerContext.impactAnalysis?.directModules.length ?? 0)
+              + (workerContext.impactAnalysis?.dependentModules.length ?? 0);
+            const briefCount = workerContext.registryBriefs?.length ?? 0;
+            this.emit('log', { line: `[verbose] Worker context: ${modCount} affected modules, ${briefCount} file briefs` });
+          }
+
           result = await workerAgent.runWorker({
             taskTitle: context.task.title,
             taskDescription: context.task.description || '',
@@ -376,6 +458,7 @@ export class PairPipeline extends EventEmitter {
             projectName: context.task.linearProject?.name,
             onLog,
             processContext: { taskId: context.task.id, stage: 'worker' },
+            workerContext,
           });
           agentPair.saveWorkerResult(context.session.id, result as WorkerResult);
           context.workerResult = result as WorkerResult;

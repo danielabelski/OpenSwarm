@@ -388,12 +388,30 @@ export interface LocaleMessages {
 /**
  * Prompt template functions for each agent role.
  */
+/** Worker에 주입할 코드 컨텍스트 (반복 횟수 감소 목적) */
+export interface WorkerContext {
+  /** Knowledge Graph 기반 영향 분석 */
+  impactAnalysis?: {
+    directModules: string[];
+    dependentModules: string[];
+    testFiles: string[];
+    estimatedScope: 'small' | 'medium' | 'large';
+  };
+  /** 변경 대상 파일별 entity 상태 요약 */
+  registryBriefs?: Array<{
+    filePath: string;
+    summary: string;  // "5 entities, 1 deprecated, 2 untested"
+    highlights: string[];  // deprecated/broken/critical warning 엔티티명
+  }>;
+}
+
 export interface PromptTemplates {
   systemPrompt: string;
   buildWorkerPrompt: (opts: {
     taskTitle: string;
     taskDescription: string;
     previousFeedback?: string;
+    context?: WorkerContext;
   }) => string;
   buildReviewerPrompt: (opts: {
     taskTitle: string;

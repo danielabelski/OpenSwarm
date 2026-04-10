@@ -55,7 +55,7 @@ DON'T:
 파일 삭제가 필요하면 trash 또는 mv로 백업 폴더로 이동할 것.
 `,
 
-  buildWorkerPrompt({ taskTitle, taskDescription, previousFeedback }) {
+  buildWorkerPrompt({ taskTitle, taskDescription, previousFeedback, context }) {
     const feedbackSection = previousFeedback
       ? `\n## Previous Feedback (수정 필요)
 ${previousFeedback}
@@ -64,12 +64,46 @@ ${previousFeedback}
 `
       : '';
 
+    // 코드 컨텍스트 섹션
+    let contextSection = '';
+    if (context?.impactAnalysis || context?.registryBriefs?.length) {
+      const parts: string[] = ['## 코드 컨텍스트 (자동 생성)'];
+
+      if (context.impactAnalysis) {
+        const ia = context.impactAnalysis;
+        parts.push('');
+        parts.push('### 영향 범위');
+        parts.push(`- **직접 영향:** ${ia.directModules.join(', ') || '식별 안됨'}`);
+        if (ia.dependentModules.length > 0) {
+          parts.push(`- **간접 의존:** ${ia.dependentModules.join(', ')}`);
+        }
+        if (ia.testFiles.length > 0) {
+          parts.push(`- **실행할 테스트:** ${ia.testFiles.join(', ')}`);
+        }
+        parts.push(`- **영향 범위:** ${ia.estimatedScope}`);
+      }
+
+      if (context.registryBriefs && context.registryBriefs.length > 0) {
+        parts.push('');
+        parts.push('### 파일 상태 (Code Registry)');
+        for (const brief of context.registryBriefs) {
+          parts.push(`- \`${brief.filePath}\`: ${brief.summary}`);
+          if (brief.highlights.length > 0) {
+            parts.push(`  ⚠️ ${brief.highlights.join(', ')}`);
+          }
+        }
+      }
+
+      parts.push('');
+      contextSection = parts.join('\n') + '\n';
+    }
+
     return `# Worker Agent
 
 ## Task
 - **Title:** ${taskTitle}
 - **Description:** ${taskDescription}
-${feedbackSection}
+${feedbackSection}${contextSection}
 ## Instructions
 1. 작업을 수행하고 결과를 보고하라
 2. 변경한 파일 목록을 명시하라
