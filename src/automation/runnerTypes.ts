@@ -7,7 +7,7 @@ import type { ExecutorResult } from '../orchestration/workflow.js';
 import type { DefaultRolesConfig, ProjectAgentConfig, JobProfile } from '../core/types.js';
 
 export interface AutonomousConfig {
-  defaultAdapter?: 'claude' | 'codex' | 'gpt';
+  defaultAdapter?: 'claude' | 'codex' | 'gpt' | 'local';
   linearTeamId: string;
   allowedProjects: string[];
   heartbeatSchedule: string;

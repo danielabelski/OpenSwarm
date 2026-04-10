@@ -8,7 +8,7 @@ import type { WorkerResult, ReviewResult } from '../agents/agentPair.js';
 // Re-export for convenience
 export type { WorkerResult, ReviewResult };
 
-export type AdapterName = 'claude' | 'codex' | 'gpt';
+export type AdapterName = 'claude' | 'codex' | 'gpt' | 'local';
 
 /**
  * Raw result from a CLI process execution
