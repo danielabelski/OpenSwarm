@@ -124,9 +124,9 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       break;
     }
 
-    // 히스토리 압축 — 메시지가 많아지면 오래된 tool 결과를 요약으로 교체
-    if (turn > 0 && turn % COMPRESS_INTERVAL === 0) {
-      compressHistory(messages);
+    // 매 턴 히스토리 압축 — 이전 턴의 tool call/result를 1줄 요약으로 교체
+    if (turn >= 2) {
+      compactPriorTurns(messages);
     }
 
     // API 호출
@@ -227,62 +227,80 @@ export function loopResultToCliResult(result: AgenticLoopResult): CliRunResult {
 
 // ============ 히스토리 압축 ============
 
-/** N턴마다 오래된 tool 결과를 압축 */
-const COMPRESS_INTERVAL = 4;
-/** 최근 N개 메시지는 유지 (system + user + 최근 tool 쌍) */
-const KEEP_RECENT = 6;
-/** tool result 압축 시 최대 길이 */
-const COMPRESSED_RESULT_MAX = 200;
-
 /**
- * 오래된 tool call/result 쌍을 요약으로 교체.
- * system + user 메시지는 항상 유지.
- * 최근 KEEP_RECENT개 메시지는 원본 유지.
+ * 최근 1턴(assistant + tool results)만 원본 유지.
+ * 그 이전 턴의 assistant+tool 쌍을 1줄 요약 assistant 메시지로 교체.
+ *
+ * 구조 변환:
+ *   [system, user, asst(tool_calls), tool, tool, asst(tool_calls), tool, ...]
+ *   → [system, user, asst("Prior: read_file→ok, edit→ok"), asst(latest_tool_calls), tool, ...]
+ *
+ * OpenAI API 제약: tool 메시지는 직전 assistant의 tool_call_id와 대응해야 함.
+ * 따라서 오래된 tool 메시지는 삭제하고, 해당 assistant도 일반 텍스트로 교체.
  */
-function compressHistory(messages: ChatMessage[]): void {
-  // system(0~1) + user(1) + ... + recent(KEEP_RECENT)
-  // 압축 대상: system/user 뒤 ~ 최근 KEEP_RECENT 전
-  const headerCount = messages[0]?.role === 'system' ? 2 : 1;  // system + user or just user
-  const compressEnd = messages.length - KEEP_RECENT;
+function compactPriorTurns(messages: ChatMessage[]): void {
+  const headerCount = messages[0]?.role === 'system' ? 2 : 1;
 
-  if (compressEnd <= headerCount) return;  // 압축할 게 없음
-
-  for (let i = headerCount; i < compressEnd; i++) {
-    const msg = messages[i];
-
-    // tool 결과 압축 — 긴 내용을 요약으로 교체
-    if (msg.role === 'tool' && msg.content.length > COMPRESSED_RESULT_MAX) {
-      const firstLine = msg.content.split('\n')[0].slice(0, 100);
-      const lineCount = msg.content.split('\n').length;
-      messages[i] = {
-        ...msg,
-        content: `${firstLine}... (${lineCount} lines, compressed)`,
-      };
-    }
-
-    // assistant의 tool_calls — arguments 압축
-    if (msg.role === 'assistant' && msg.tool_calls) {
-      for (const tc of msg.tool_calls) {
-        if (tc.function.arguments.length > COMPRESSED_RESULT_MAX) {
-          try {
-            const args = JSON.parse(tc.function.arguments);
-            // 핵심 필드만 유지
-            const summary: Record<string, unknown> = {};
-            for (const [k, v] of Object.entries(args)) {
-              if (typeof v === 'string' && v.length > 100) {
-                summary[k] = v.slice(0, 80) + '...(truncated)';
-              } else {
-                summary[k] = v;
-              }
-            }
-            tc.function.arguments = JSON.stringify(summary);
-          } catch {
-            // JSON 파싱 실패 — 그대로 유지
-          }
-        }
-      }
+  // 마지막 assistant+tool 블록의 시작 인덱스 찾기
+  let lastAssistantIdx = -1;
+  for (let i = messages.length - 1; i >= headerCount; i--) {
+    if (messages[i].role === 'assistant') {
+      lastAssistantIdx = i;
+      break;
     }
   }
+  if (lastAssistantIdx <= headerCount) return; // 압축할 이전 턴이 없음
+
+  // headerCount ~ lastAssistantIdx 사이의 모든 assistant+tool 쌍을 요약
+  const summaryParts: string[] = [];
+  const toRemove: number[] = [];
+
+  for (let i = headerCount; i < lastAssistantIdx; i++) {
+    const msg = messages[i];
+
+    if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+      // tool call 요약: "read_file(src/foo.ts), edit_file(src/foo.ts)"
+      const callSummaries = msg.tool_calls.map(tc => {
+        try {
+          const args = JSON.parse(tc.function.arguments);
+          const key = args.path || args.pattern || args.command;
+          const short = typeof key === 'string' ? key.slice(0, 50) : '';
+          return `${tc.function.name}(${short})`;
+        } catch {
+          return tc.function.name;
+        }
+      });
+      summaryParts.push(callSummaries.join(', '));
+      toRemove.push(i);
+    } else if (msg.role === 'tool') {
+      // tool result → 성공/실패만 기록
+      const ok = !msg.content.startsWith('BLOCKED') && !msg.content.startsWith('Tool error');
+      const firstLine = msg.content.split('\n')[0].slice(0, 60);
+      summaryParts.push(ok ? `→ok` : `→err: ${firstLine}`);
+      toRemove.push(i);
+    } else if (msg.role === 'assistant' && !msg.tool_calls) {
+      // 일반 assistant 메시지 — 첫 줄만 유지
+      const short = (msg.content ?? '').split('\n')[0].slice(0, 80);
+      if (short) summaryParts.push(`note: ${short}`);
+      toRemove.push(i);
+    }
+  }
+
+  if (toRemove.length === 0) return;
+
+  // 요약 메시지 생성
+  const summaryText = `[Prior turns compacted] ${summaryParts.join(' | ')}`;
+
+  // 역순으로 제거 (인덱스 안정성)
+  for (let i = toRemove.length - 1; i >= 0; i--) {
+    messages.splice(toRemove[i], 1);
+  }
+
+  // header 직후에 요약 삽입
+  messages.splice(headerCount, 0, {
+    role: 'assistant',
+    content: summaryText,
+  });
 }
 
 // ============ 헬퍼 ============
