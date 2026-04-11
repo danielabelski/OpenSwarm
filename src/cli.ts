@@ -181,6 +181,8 @@ program
   .option('--search <query>', 'Full-text search entities')
   .option('--scan', 'Scan entire repository and sync to registry')
   .option('--bs', 'Scan for BS patterns (bad code smells)')
+  .option('--tree', 'Display codebase tree with entity counts and risk')
+  .option('--ci', 'CI/CD mode: JSON output, exit 1 on critical issues')
   .option('-v, --verbose', 'Verbose output (with --scan)')
   .option('--project <id>', 'Filter by project ID')
   .action(async (filePath: string | undefined, opts: {
@@ -192,6 +194,8 @@ program
     search?: string;
     scan?: boolean;
     bs?: boolean;
+    tree?: boolean;
+    ci?: boolean;
     verbose?: boolean;
     project?: string;
   }) => {

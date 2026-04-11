@@ -147,6 +147,8 @@ export async function handleCheck(
     scan?: boolean;
     bs?: boolean;
     verbose?: boolean;
+    tree?: boolean;
+    ci?: boolean;
   },
 ): Promise<void> {
   try {
@@ -261,7 +263,112 @@ export async function handleCheck(
       return;
     }
 
-    // --stats: 전체 통계
+    // --tree: directory tree with entity counts and risk indicators
+    if (opts.tree) {
+      const projectId = opts.project ?? resolveProjectId(process.cwd());
+      const scopePath = filePath || '';  // optional dir scope
+      const { entities } = store.listEntities({ projectId, limit: 50000, offset: 0 });
+
+      // Group entities by directory → file
+      const tree = new Map<string, Map<string, { total: number; untested: number; highRisk: number; deprecated: number; kinds: Map<string, number> }>>();
+
+      for (const e of entities) {
+        if (scopePath && !e.filePath.startsWith(scopePath)) continue;
+        const parts = e.filePath.split('/');
+        const fileName = parts.pop()!;
+        const dirPath = parts.join('/') || '.';
+
+        if (!tree.has(dirPath)) tree.set(dirPath, new Map());
+        const dir = tree.get(dirPath)!;
+
+        if (!dir.has(fileName)) {
+          dir.set(fileName, { total: 0, untested: 0, highRisk: 0, deprecated: 0, kinds: new Map() });
+        }
+        const file = dir.get(fileName)!;
+        file.total++;
+        if (!e.hasTests) file.untested++;
+        if (e.riskLevel === 'high') file.highRisk++;
+        if (e.status === 'deprecated') file.deprecated++;
+        file.kinds.set(e.kind, (file.kinds.get(e.kind) || 0) + 1);
+      }
+
+      // Sort directories
+      const sortedDirs = [...tree.keys()].sort();
+      const totalFiles = [...tree.values()].reduce((s, d) => s + d.size, 0);
+      const totalEntities = entities.filter(e => !scopePath || e.filePath.startsWith(scopePath)).length;
+
+      console.log(`\n${c.bold}Code Tree${c.reset}${scopePath ? ` (${scopePath})` : ''} — ${totalFiles} files, ${totalEntities} entities\n`);
+
+      for (const dirPath of sortedDirs) {
+        const files = tree.get(dirPath)!;
+        const dirTotal = [...files.values()].reduce((s, f) => s + f.total, 0);
+        const dirUntested = [...files.values()].reduce((s, f) => s + f.untested, 0);
+        const dirHighRisk = [...files.values()].reduce((s, f) => s + f.highRisk, 0);
+
+        // Directory header
+        const riskFlag = dirHighRisk > 0 ? ` ${c.red}${dirHighRisk} high-risk${c.reset}` : '';
+        console.log(`${c.bold}${dirPath}/${c.reset} ${c.dim}(${dirTotal} entities, ${dirUntested} untested${riskFlag})${c.reset}`);
+
+        // Files in directory
+        const sortedFiles = [...files.entries()].sort((a, b) => b[1].total - a[1].total);
+        for (const [fileName, info] of sortedFiles) {
+          const kindStr = [...info.kinds.entries()].map(([k, n]) => `${n} ${k}`).join(', ');
+          const flags: string[] = [];
+          if (info.highRisk > 0) flags.push(`${c.red}${info.highRisk} high-risk${c.reset}`);
+          if (info.deprecated > 0) flags.push(`${c.red}${info.deprecated} deprecated${c.reset}`);
+          const flagStr = flags.length ? ' ' + flags.join(' ') : '';
+          const testPct = info.total > 0 ? Math.round(((info.total - info.untested) / info.total) * 100) : 0;
+          const testColor = testPct === 100 ? c.green : testPct > 50 ? c.yellow : c.red;
+
+          console.log(`  ${c.cyan}${fileName}${c.reset} ${c.dim}${kindStr}${c.reset} ${testColor}${testPct}% tested${c.reset}${flagStr}`);
+        }
+      }
+      console.log();
+      return;
+    }
+
+    // --ci: CI/CD mode — machine-readable JSON, exit code 1 on critical issues
+    if (opts.ci) {
+      const projectPath = process.cwd();
+      const projectId = opts.project ?? resolveProjectId(projectPath);
+
+      // Run BS scan
+      const { scanRepository: scanBs } = await import('../registry/bsDetector.js');
+      const bsResult = await scanBs(projectPath, { verbose: false });
+
+      // Registry stats
+      const stats = store.getStats(projectId);
+
+      const result = {
+        project: projectId,
+        path: projectPath,
+        registry: {
+          total: stats.total,
+          deprecated: stats.deprecated,
+          untested: stats.untested,
+          highRisk: stats.highRisk,
+          warnings: stats.withWarnings,
+        },
+        bs: {
+          filesScanned: bsResult.filesScanned,
+          score: bsResult.bsScore,
+          critical: bsResult.critical,
+          warning: bsResult.warning,
+          minor: bsResult.minor,
+        },
+        pass: bsResult.critical === 0,
+      };
+
+      console.log(JSON.stringify(result, null, 2));
+
+      // Exit code 1 if critical issues
+      if (bsResult.critical > 0) {
+        process.exitCode = 1;
+      }
+      return;
+    }
+
+    // --stats: full statistics
     if (opts.stats) {
       const stats = store.getStats(opts.project);
       console.log(`\n${c.bold}Registry Stats${c.reset}`);
