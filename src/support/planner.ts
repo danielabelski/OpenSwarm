@@ -3,13 +3,13 @@
 // Decompose large issues into 30-min sub-tasks
 // ============================================
 
-import { spawn } from 'node:child_process';
-import { writeFileSync, unlinkSync } from 'node:fs';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
-import { type CostInfo, extractCostFromStreamJson, formatCost } from './costTracker.js';
+import type { CostInfo } from './costTracker.js';
 import { t, getPrompts } from '../locale/index.js';
 import type { ImpactAnalysis } from '../knowledge/types.js';
-import { buildWorkerEnv } from '../adapters/envPath.js';
+import type { AdapterName } from '../adapters/types.js';
+import { getAdapter, spawnCli } from '../adapters/index.js';
+import { expandPath } from '../core/config.js';
 
 // Types
 
@@ -20,6 +20,8 @@ export interface PlannerOptions {
   projectName?: string;
   timeoutMs?: number;
   model?: string;
+  adapterName?: AdapterName;  // CLI adapter (default: configured default)
+  maxTurns?: number;  // Max agentic turns for read-only exploration (default 15)
   targetMinutes?: number;  // Target time per sub-task (default 25 min)
   onLog?: (line: string) => void;  // Stream planner stdout to dashboard
   impactAnalysis?: ImpactAnalysis;  // KG 영향 분석 (파일 분리 유도)
@@ -68,27 +70,57 @@ function buildPlannerPrompt(options: PlannerOptions): string {
 // Planner Execution
 
 /**
- * Run Planner agent
+ * Read-only guard appended to the planner prompt. The planner runs through the
+ * same agentic loop as the worker (no built-in read-only mode), so the prompt
+ * keeps it from mutating the repo — it should explore (read_file/search_files)
+ * and emit the JSON plan, nothing else.
+ */
+const READ_ONLY_GUARD =
+  '\n\n---\n' +
+  'IMPORTANT — you are PLANNING ONLY. Do NOT edit, write, or create any files. ' +
+  'Use read_file and search_files to understand the codebase first, then output your ' +
+  'decomposition as the required JSON (in a ```json block) as your final message.';
+
+/**
+ * Run the Planner through the OpenSwarm agentic loop (the same path as the
+ * Worker), read-only and multi-turn. Replaces the former `claude -p --max-turns 1`
+ * shell-out — removes the claude-binary dependency and lets the planner read the
+ * code before decomposing. The `PlannerResult` contract is unchanged.
  */
 export async function runPlanner(options: PlannerOptions): Promise<PlannerResult> {
-  const prompt = buildPlannerPrompt(options);
+  const prompt = buildPlannerPrompt(options) + READ_ONLY_GUARD;
 
   try {
-    const output = await runClaudeCli(
-      prompt,
-      options.timeoutMs ?? 120000,  // 2 min timeout
-      options.model,
-      options.onLog
-    );
+    const adapter = getAdapter(options.adapterName);
+    const cwd = expandPath(options.projectPath);
+    // Drop Claude-CLI-style model ids (e.g. `claude-opus-4-7`) — they are not
+    // valid on the openrouter/local adapters; fall back to the adapter default.
+    // OpenRouter Claude ids carry an org prefix (`anthropic/claude-...`) and pass.
+    const model = options.model && !options.model.startsWith('claude-') ? options.model : undefined;
 
-    const costInfo = extractCostFromStreamJson(output);
-    if (costInfo) {
-      console.log(`[Planner] Cost: ${formatCost(costInfo)}`);
+    const raw = await spawnCli(adapter, {
+      prompt,
+      cwd,
+      timeoutMs: options.timeoutMs ?? 600_000,
+      model,
+      maxTurns: options.maxTurns ?? 15,
+      onLog: options.onLog ? (line: string) => options.onLog!(humanizePlannerOutput(line)) : undefined,
+      systemPrompt: getPrompts().systemPrompt,
+      // Planner is a judgment role — keep reasoning ON (unlike the worker).
+    });
+
+    if (raw.exitCode !== 0 && !raw.stdout.trim()) {
+      return {
+        success: false,
+        originalIssue: options.taskTitle,
+        needsDecomposition: false,
+        subTasks: [],
+        totalEstimatedMinutes: 0,
+        error: raw.stderr.slice(0, 500) || `Planner adapter exited with code ${raw.exitCode}`,
+      };
     }
 
-    const result = parsePlannerOutput(output, options.taskTitle);
-    result.costInfo = costInfo;
-    return result;
+    return parsePlannerOutput(raw.stdout, options.taskTitle);
   } catch (error) {
     return {
       success: false,
@@ -128,117 +160,6 @@ function humanizePlannerOutput(text: string): string {
   if (trimmed.startsWith('```')) return '';
 
   return trimmed;
-}
-
-/**
- * Run Claude CLI from /tmp to avoid project-specific MCP servers and hooks.
- * STONKS has session-start.sh + playwright/pykis/linear MCP servers that
- * cause >10min startup when claude runs from the project directory.
- */
-async function runClaudeCli(
-  prompt: string,
-  timeoutMs: number,
-  model?: string,
-  onLog?: (line: string) => void
-): Promise<string> {
-  const tmpFile = `/tmp/planner-prompt-${Date.now()}.txt`;
-  writeFileSync(tmpFile, prompt);
-
-  const args = ['--output-format', 'stream-json', '--verbose', '--max-turns', '1'];
-  if (model) {
-    args.push('--model', model);
-  }
-  args.push('-p', prompt);
-
-  return new Promise<string>((resolve, reject) => {
-    const proc = spawn(
-      'claude',
-      args,
-      {
-        shell: false,
-        cwd: '/tmp',   // Neutral dir — no project .claude/ settings loaded
-        env: buildWorkerEnv(process.env),
-        stdio: ['ignore', 'pipe', 'pipe'],
-      }
-    );
-
-    let output = '';
-    let stderrOutput = '';
-
-    proc.stdout?.on('data', (chunk: Buffer) => {
-      const text = chunk.toString();
-      output += text;
-      if (onLog) {
-        // Stream assistant text lines to dashboard
-        for (const line of text.split('\n').filter((l: string) => l.trim())) {
-          try {
-            const event = JSON.parse(line);
-            if (event.type === 'assistant' && event.message?.content) {
-              for (const block of event.message.content) {
-                if (block.type === 'text') {
-                  // Convert planner JSON result to human-readable summary
-                  const humanized = humanizePlannerOutput(block.text);
-                  onLog(humanized);
-                }
-              }
-            }
-          } catch {
-            // Not a JSON line — skip raw stream noise (tool calls, etc)
-            if (!line.startsWith('{') && !line.startsWith('[')) {
-              onLog(line);
-            }
-          }
-        }
-      }
-    });
-
-    proc.stderr?.on('data', (chunk: Buffer) => {
-      const text = chunk.toString();
-      stderrOutput += text;
-      // Log stderr in real-time for debugging
-      console.error('[Planner stderr]', text.slice(0, 500));
-    });
-
-    const timer = setTimeout(() => {
-      proc.kill('SIGTERM');
-      reject(new Error(`Planner timeout after ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    proc.on('close', (code: number | null) => {
-      clearTimeout(timer);
-      try { unlinkSync(tmpFile); } catch { /* ignore */ }
-
-      // Success: exit code 0, or non-zero but we got parseable output
-      if (code === 0) {
-        resolve(output);
-        return;
-      }
-
-      // Non-zero exit: check if we got usable output anyway
-      if (output.trim()) {
-        console.warn(`[Planner] Non-zero exit (${code}) but got output, attempting to parse`);
-        if (stderrOutput.trim()) {
-          console.warn('[Planner] stderr:', stderrOutput.slice(0, 500));
-        }
-        resolve(output);
-        return;
-      }
-
-      // Complete failure: no output and non-zero exit
-      const errorMsg = stderrOutput.trim() || 'No error output captured';
-      const truncatedStderr = errorMsg.length > 1000 ? errorMsg.slice(0, 1000) + '... (truncated)' : errorMsg;
-      console.error('[Planner] Process exited with code', code);
-      console.error('[Planner] Full stderr:', errorMsg);
-      console.error('[Planner] stdout length:', output.length);
-      reject(new Error(`Claude CLI exited with code ${code}. stderr: ${truncatedStderr}`));
-    });
-
-    proc.on('error', (err: Error) => {
-      clearTimeout(timer);
-      try { unlinkSync(tmpFile); } catch { /* ignore */ }
-      reject(err);
-    });
-  });
 }
 
 /**
