@@ -14,6 +14,7 @@ import * as scheduler from '../automation/scheduler.js';
 import * as web from '../support/web.js';
 import * as autonomous from '../automation/autonomousRunner.js';
 import { createNotifier } from '../notify/notifier.js';
+import { selectTaskSource } from '../automation/taskSource.js';
 import { PRProcessor } from '../automation/prProcessor.js';
 import { startCIWorker, stopCIWorker } from '../automation/ciWorker.js';
 import { initMonitors } from '../automation/longRunningMonitor.js';
@@ -147,14 +148,12 @@ export async function startService(config: SwarmConfig): Promise<void> {
   if (config.autonomous?.enabled) {
     console.log('[Service] Autonomous mode auto-start enabled');
 
-    // Register Linear fetcher.
-    // Uses slim mode: each issue costs 1 resolver call (project) instead of 3
-    // (project + comments + labels). With ~200 issues per HB and 4 HBs/hour
-    // that drops API usage from ~2400/hr to ~800/hr, well under Linear's
-    // 3500/hr cap. Comment-based task-state hydration is sacrificed on this
-    // path — it can be re-added with a targeted per-issue resolve for the
-    // subset we actually pick up.
-    autonomous.setLinearFetcher(async () => {
+    // Select the task source: Linear when configured, else the local SQLite
+    // store (no external account). The Linear fetcher closure is preserved
+    // verbatim — slim mode (1 resolver call/issue vs 3) + comment hydration +
+    // task-state enrichment — and only used by LinearTaskSource.
+    const linearConfigured = !!(config.linearApiKey && config.linearTeamId);
+    autonomous.setTaskSource(selectTaskSource(linearConfigured, async () => {
       const issues = await linear.getMyIssues({ slim: true, timeoutMs: 90000 });
       const { linearIssueToTask } = await import('../orchestration/decisionEngine.js');
       return issues.map((issue: any) => {
@@ -173,8 +172,8 @@ export async function startService(config: SwarmConfig): Promise<void> {
           } : undefined,
         }));
       });
-    });
-    console.log('[Service] Linear fetcher registered');
+    }));
+    console.log(`[Service] Task source registered (${linearConfigured ? 'linear' : 'local'})`);
 
     // Register the notifier for the configured channel (Discord/Slack/Telegram/
     // webhook). Discord's sender is injected so the notifier stays decoupled.

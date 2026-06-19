@@ -40,6 +40,8 @@ export type SubIssueResult = { id: string; identifier: string; title: string } |
 export interface ITaskSource {
   readonly kind: 'linear' | 'local';
   fetchTasks(): Promise<TaskItem[]>;
+  /** Create a top-level task/issue (used by the /plan cockpit to seed a parent). */
+  createTask(title: string, description: string, projectId?: string): Promise<SubIssueResult>;
   updateState(issueId: string, state: TaskState): Promise<void>;
   addComment(issueId: string, body: string): Promise<void>;
   createSubIssue(
@@ -64,6 +66,10 @@ export class LinearTaskSource implements ITaskSource {
   constructor(private readonly fetch: () => Promise<TaskItem[]>) {}
 
   fetchTasks(): Promise<TaskItem[]> { return this.fetch(); }
+  async createTask(title: string, description: string, _projectId?: string): Promise<SubIssueResult> {
+    const r = await linear.createIssue(title, description, []);
+    return 'error' in r ? r : { id: r.id, identifier: r.identifier, title: r.title };
+  }
   updateState(issueId: string, state: TaskState): Promise<void> { return linear.updateIssueState(issueId, state); }
   addComment(issueId: string, body: string): Promise<void> { return linear.addComment(issueId, body); }
   createSubIssue(parentId: string, title: string, description: string, options?: { priority?: number; projectId?: string; estimatedMinutes?: number }): Promise<SubIssueResult> {
@@ -110,6 +116,14 @@ export class SqliteTaskSource implements ITaskSource {
   async fetchTasks(): Promise<TaskItem[]> {
     const { issues } = this.store.listIssues({ status: ['todo', 'in_progress'], limit: 200, offset: 0 });
     return issues.map(issueToTask);
+  }
+  async createTask(title: string, description: string, projectId?: string): Promise<SubIssueResult> {
+    try {
+      const issue = this.store.createIssue({ projectId: projectId ?? this.defaultProjectId, title, description, status: 'todo' });
+      return { id: issue.id, identifier: issue.id, title: issue.title };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
   }
   async updateState(issueId: string, state: TaskState): Promise<void> {
     this.store.changeStatus(issueId, STATE_TO_STATUS[state]);

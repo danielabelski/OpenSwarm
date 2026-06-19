@@ -14,6 +14,7 @@ import * as dev from '../support/dev.js';
 import * as scheduler from '../automation/scheduler.js';
 import * as codex from '../memory/codex.js';
 import * as autonomous from '../automation/autonomousRunner.js';
+import { selectTaskSource } from '../automation/taskSource.js';
 import { linearIssueToTask, TaskItem } from '../orchestration/decisionEngine.js';
 
 import {
@@ -841,8 +842,8 @@ export async function handleAuto(msg: Message, args: string[]): Promise<void> {
         },
       });
 
-      // Register Linear fetcher
-      autonomous.setLinearFetcher(async (): Promise<TaskItem[]> => {
+      // Register the task source (Linear when configured, else local SQLite).
+      autonomous.setTaskSource(selectTaskSource(linear.isLinearInitialized(), async (): Promise<TaskItem[]> => {
         try {
           const issues = await linear.getMyIssues({ slim: true, timeoutMs: 30000 });
           return issues.map((issue: any) => linearIssueToTask({
@@ -862,7 +863,7 @@ export async function handleAuto(msg: Message, args: string[]): Promise<void> {
           console.error('Linear fetch error:', err);
           return [];
         }
-      });
+      }));
 
       // Start runner
       console.log(`[Auto] Starting with pairMode: ${hasPairFlag}`);

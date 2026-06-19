@@ -30,8 +30,7 @@ import { initLocale } from '../locale/index.js';
 import { runChatCompletion, getDefaultChatModel } from './chatBackend.js';
 import { handleGraphQL, isGraphQLRequest } from '../issues/graphql/server.js';
 import { ISSUE_BOARD_HTML } from '../issues/issueBoardHtml.js';
-import * as linear from '../linear/index.js';
-import { createSubIssuesWithDependencies } from '../automation/runnerExecution.js';
+import { createSubIssuesWithDependencies, getTaskSource } from '../automation/runnerExecution.js';
 import type { SubTask } from './planner.js';
 
 let server: ReturnType<typeof createServer> | null = null;
@@ -1055,27 +1054,28 @@ export async function startWebServer(port: number = 3847): Promise<void> {
             runnerRef?.heartbeat().catch((e: Error) => console.error('[Web] plan heartbeat error:', e));
           };
 
-          // Path A — Linear configured: create a parent issue + sub-issues with
-          // dependency wiring (reusing the autonomous engine), then heartbeat.
-          if (linear.isLinearInitialized()) {
-            const parent = await linear.createIssue(
+          // Path A — a task source is registered (Linear OR local SQLite): create a
+          // parent issue + dependency-wired sub-issues (reusing the autonomous
+          // engine, which routes through the same source), then heartbeat.
+          const source = getTaskSource();
+          if (source) {
+            const parent = await source.createTask(
               goal,
               `Planned via the \`/plan\` cockpit.\n\n${tasks.length} sub-task(s) dispatched.`,
-              [],
             );
             if ('error' in parent) {
               res.writeHead(502, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: `Linear: ${parent.error}` }));
+              res.end(JSON.stringify({ error: `Task source: ${parent.error}` }));
               return;
             }
 
             if (tasks.length === 0) {
               // Planner saw no decomposition — run the goal itself as one task.
-              await linear.updateIssueState(parent.id, 'Todo').catch(() => {});
+              await source.updateState(parent.id, 'Todo').catch(() => {});
               triggerHeartbeat();
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({
-                mode: 'linear',
+                mode: source.kind,
                 parentIssue: { id: parent.id, identifier: parent.identifier },
                 subIssues: [],
               }));
@@ -1094,7 +1094,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
             );
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
-              mode: 'linear',
+              mode: source.kind,
               parentIssue: { id: parent.id, identifier: parent.identifier },
             }));
             return;

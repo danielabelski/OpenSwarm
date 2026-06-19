@@ -14,7 +14,6 @@ import { saveCognitiveMemory } from '../memory/index.js';
 import * as workerAgent from '../agents/worker.js';
 import * as reviewerAgent from '../agents/reviewer.js';
 import * as projectMapper from '../support/projectMapper.js';
-import * as linear from '../linear/index.js';
 import * as planner from '../support/planner.js';
 import type { SubTask } from '../support/planner.js';
 import { analyzeIssue } from '../knowledge/index.js';
@@ -22,6 +21,7 @@ import { runDraftAnalysis, type DraftAnalysis } from '../agents/draftAnalyzer.js
 import { t } from '../locale/index.js';
 import { broadcastEvent } from '../core/eventHub.js';
 import type { Notifier } from '../notify/notifier.js';
+import type { ITaskSource } from './taskSource.js';
 import {
   buildBranchName,
   createWorktree,
@@ -69,37 +69,41 @@ export async function reportToDiscord(message: string | EmbedBuilder): Promise<v
   await notifier.notify(message);
 }
 
-// Linear Integration
+// Task source (Linear OR local SQLite — INT-1577). Injected at service start;
+// the runner routes all task tracking through it instead of importing linear.* .
 
-type LinearFetchFn = () => Promise<TaskItem[]>;
+let taskSource: ITaskSource | null = null;
 
-let linearFetch: LinearFetchFn | null = null;
+export function setTaskSource(source: ITaskSource): void {
+  taskSource = source;
+  console.log(`[AutonomousRunner] Task source registered (${source.kind})`);
+}
 
-export function setLinearFetcher(fetchFn: LinearFetchFn): void {
-  linearFetch = fetchFn;
-  console.log('[AutonomousRunner] Linear fetcher registered');
+/** Accessor for callers outside this module (autonomousRunner). */
+export function getTaskSource(): ITaskSource | null {
+  return taskSource;
 }
 
 // Track consecutive fetch failures for visibility
 let fetchFailureCount = 0;
 
 export async function fetchLinearTasks(): Promise<{ tasks: TaskItem[]; error?: string }> {
-  if (!linearFetch) {
-    console.log('[AutonomousRunner] No Linear fetcher registered');
-    return { tasks: [], error: 'No Linear fetcher registered' };
+  if (!taskSource) {
+    console.log('[AutonomousRunner] No task source registered');
+    return { tasks: [], error: 'No task source registered' };
   }
 
   try {
-    const tasks = await linearFetch();
+    const tasks = await taskSource.fetchTasks();
     if (fetchFailureCount > 0) {
-      console.log(`[AutonomousRunner] Linear fetch recovered after ${fetchFailureCount} failures`);
+      console.log(`[AutonomousRunner] Task fetch recovered after ${fetchFailureCount} failures`);
     }
     fetchFailureCount = 0;
     return { tasks };
   } catch (error) {
     fetchFailureCount++;
     const msg = error instanceof Error ? error.message : String(error);
-    console.error(`[AutonomousRunner] Linear fetch failed (${fetchFailureCount}x consecutive): ${msg}`);
+    console.error(`[AutonomousRunner] Task fetch failed (${fetchFailureCount}x consecutive): ${msg}`);
     return { tasks: [], error: msg };
   }
 }
@@ -254,16 +258,13 @@ export async function createSubIssuesWithDependencies(
       `${t('runner.decomposition.estimatedTime', { n: String(subTask.estimatedMinutes) })}${depsStr}\n\n` +
       t('runner.decomposition.autoDecomposed', { parentTitle: task.title });
 
-    const subResult = await linear.createSubIssue(
-      parentIssueId,
-      subTask.title,
-      subDescription,
-      {
-        priority: subTask.priority,
-        projectId: task.linearProject?.id,
-        estimatedMinutes: subTask.estimatedMinutes,
-      }
-    );
+    const subResult = taskSource
+      ? await taskSource.createSubIssue(parentIssueId, subTask.title, subDescription, {
+          priority: subTask.priority,
+          projectId: task.linearProject?.id,
+          estimatedMinutes: subTask.estimatedMinutes,
+        })
+      : { error: 'No task source registered' };
 
     if ('error' in subResult) {
       console.error(`[AutonomousRunner] Failed to create sub-issue: ${subResult.error}`);
@@ -296,7 +297,7 @@ export async function createSubIssuesWithDependencies(
   );
   console.log(`[AutonomousRunner] Registered decomposition: parent=${parentIssueId}, children=${createdSubIssues.length}, daily=${getDailyCreationCount()}/${dailyLimit}`);
 
-  await linear.markAsDecomposed(
+  await taskSource?.markAsDecomposed(
     parentIssueId,
     createdSubIssues.length,
     totalEstimatedMinutes
@@ -312,7 +313,7 @@ export async function createSubIssuesWithDependencies(
     childIssueIds: createdSubIssues.map((subIssue) => subIssue.id),
   });
 
-  await linear.addComment(
+  await taskSource?.addComment(
     parentIssueId,
     buildTaskStateSyncComment(parentState, 'Parent task decomposed')
   );
@@ -360,12 +361,12 @@ export async function createSubIssuesWithDependencies(
 
     try {
       if (isReady) {
-        await linear.updateIssueState(subIssue.id, 'Todo');
+        await taskSource?.updateState(subIssue.id, 'Todo');
         console.log(`[AutonomousRunner] Moved ${subIssue.identifier} to Todo`);
       } else {
         console.log(`[AutonomousRunner] Keeping ${subIssue.identifier} in Backlog until dependencies resolve`);
       }
-      await linear.addComment(
+      await taskSource?.addComment(
         subIssue.id,
         buildTaskStateSyncComment(
           childState,
@@ -412,8 +413,8 @@ export async function decomposeTask(
       console.log(`[AutonomousRunner] Decomposition depth limit reached: ${currentDepth}/${maxDepth}`);
       if (autoBacklog && task.issueId) {
         try {
-          await linear.updateIssueState(task.issueId, 'Backlog');
-          await linear.addComment(task.issueId,
+          await taskSource?.updateState(task.issueId, 'Backlog');
+          await taskSource?.addComment(task.issueId,
             `⚠️ **Auto-moved to Backlog**\n\n` +
             `Reason: Decomposition depth limit reached (${currentDepth}/${maxDepth})\n\n` +
             `This task has been nested too deeply. Please review and simplify the task structure, ` +
@@ -433,8 +434,8 @@ export async function decomposeTask(
       console.log(`[AutonomousRunner] Children count limit reached: ${childrenCount}/${maxChildren}`);
       if (autoBacklog) {
         try {
-          await linear.updateIssueState(task.issueId, 'Backlog');
-          await linear.addComment(task.issueId,
+          await taskSource?.updateState(task.issueId, 'Backlog');
+          await taskSource?.addComment(task.issueId,
             `⚠️ **Auto-moved to Backlog**\n\n` +
             `Reason: Too many sub-issues already created (${childrenCount}/${maxChildren})\n\n` +
             `This task has generated too many sub-issues. Please review the decomposition strategy, ` +
@@ -669,7 +670,7 @@ export async function executePipeline(
       // Report to Linear
       if (task.issueId && ctx.guards?.haltToLinear) {
         try {
-          await linear.logHalt(task.issueId, sessionId, confidence, iteration, haltReason);
+          await taskSource?.logHalt(task.issueId, sessionId, confidence, iteration, haltReason);
         } catch (err) {
           console.error(`[${taskPrefix}] Linear logHalt failed:`, err);
         }
@@ -722,12 +723,12 @@ export async function executePipeline(
           branchName: worktreeInfo?.branchName,
           worktreePath: actualPath,
         });
-        await linear.logPairStart(task.issueId, sessionId, projectPath);
-        await linear.addComment(task.issueId, buildTaskStateSyncComment(inProgressState, 'Task execution started'));
+        await taskSource?.logPairStart(task.issueId, sessionId, projectPath);
+        await taskSource?.addComment(task.issueId, buildTaskStateSyncComment(inProgressState, 'Task execution started'));
       } catch (err) {
         console.error(`[${taskPrefix}] Linear logPairStart failed:`, err);
         // Continue pipeline even if this fails
-        await linear.updateIssueState(task.issueId, 'In Progress');
+        await taskSource?.updateState(task.issueId, 'In Progress');
       }
     }
 
@@ -914,8 +915,8 @@ export async function reconcileCompletionState(task: TaskItem): Promise<void> {
   const released = releaseDependentTasks(task.issueId);
   for (const child of released) {
     try {
-      await linear.updateIssueState(child.issueId, 'Todo');
-      await linear.addComment(
+      await taskSource?.updateState(child.issueId, 'Todo');
+      await taskSource?.addComment(
         child.issueId,
         buildTaskStateSyncComment(child, 'Task unblocked and ready')
       );
@@ -928,8 +929,8 @@ export async function reconcileCompletionState(task: TaskItem): Promise<void> {
   if (!parent) return;
 
   try {
-    await linear.updateIssueState(parent.issueId, 'Done');
-    await linear.addComment(
+    await taskSource?.updateState(parent.issueId, 'Done');
+    await taskSource?.addComment(
       parent.issueId,
       buildTaskStateSyncComment(parent, 'All child tasks completed')
     );
@@ -942,7 +943,7 @@ export async function syncFailureState(task: TaskItem, reason: string): Promise<
   if (!task.issueId) return;
   const state = markTaskBlocked(task.issueId, reason, task.blockedBy || [], task.linearState);
   try {
-    await linear.addComment(task.issueId, buildTaskStateSyncComment(state, 'Task blocked'));
+    await taskSource?.addComment(task.issueId, buildTaskStateSyncComment(state, 'Task blocked'));
   } catch (err) {
     console.warn(`[AutonomousRunner] Failed to sync blocked state for ${task.issueId}:`, err);
   }
@@ -956,7 +957,7 @@ export async function syncSuccessState(task: TaskItem, confidence?: number): Pro
     confidence,
   });
   try {
-    await linear.addComment(task.issueId, buildTaskStateSyncComment(state, 'Task completed'));
+    await taskSource?.addComment(task.issueId, buildTaskStateSyncComment(state, 'Task completed'));
   } catch (err) {
     console.warn(`[AutonomousRunner] Failed to sync success state for ${task.issueId}:`, err);
   }

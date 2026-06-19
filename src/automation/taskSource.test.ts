@@ -68,6 +68,19 @@ describe('SqliteTaskSource', () => {
     }
   });
 
+  it('createTask creates a top-level todo issue', async () => {
+    store = freshStore();
+    const src = new SqliteTaskSource(store, 'proj-default');
+    const result = await src.createTask('a goal', 'details');
+    expect('id' in result).toBe(true);
+    if ('id' in result) {
+      const issue = store.getIssue(result.id);
+      expect(issue?.title).toBe('a goal');
+      expect(issue?.status).toBe('todo');
+      expect(issue?.parentId).toBeUndefined();
+    }
+  });
+
   it('markAsDecomposed comments + moves the parent to Backlog', async () => {
     store = freshStore();
     const issue = store.createIssue({ projectId: 'p', title: 'big', status: 'todo' });

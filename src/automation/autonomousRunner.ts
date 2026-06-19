@@ -30,7 +30,6 @@ import {
 // ExecutorResult used via execution.reportExecutionResult
 import { checkWorkAllowed } from '../support/timeWindow.js';
 import { recordTaskOutcome } from '../memory/repoKnowledge.js';
-import * as linear from '../linear/index.js';
 import { updateProjectAfterTask } from '../linear/projectUpdater.js';
 import { TaskScheduler, initScheduler } from '../orchestration/taskScheduler.js';
 import {
@@ -40,7 +39,7 @@ import {
 import type { DefaultRolesConfig } from '../core/types.js';
 import * as planner from '../support/planner.js';
 import * as execution from './runnerExecution.js';
-import { reportToDiscord, fetchLinearTasks } from './runnerExecution.js';
+import { reportToDiscord, fetchLinearTasks, getTaskSource } from './runnerExecution.js';
 import { t } from '../locale/index.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { pruneWorktrees } from '../support/worktreeManager.js';
@@ -52,7 +51,7 @@ import type { AutonomousConfig, RunnerState } from './runnerTypes.js';
 import type { AdapterName } from '../adapters/types.js';
 
 // Re-export types and integration setters (used by service.ts)
-export { setNotifier, setLinearFetcher } from './runnerExecution.js';
+export { setNotifier, setTaskSource } from './runnerExecution.js';
 export type { AutonomousConfig, RunnerState } from './runnerTypes.js';
 export type { ProjectInfo } from './runnerState.js';
 
@@ -202,7 +201,7 @@ export class AutonomousRunner {
       if (result.success && task.issueId) {
         try {
           await execution.syncSuccessState(task);
-          await linear.logPairComplete(task.issueId, result.sessionId, {
+          await getTaskSource()?.logPairComplete(task.issueId, result.sessionId, {
             attempts: result.iterations,
             duration: Math.floor(result.totalDuration / 1000),
             filesChanged: result.workerResult?.filesChanged || [],
@@ -282,7 +281,7 @@ export class AutonomousRunner {
 
           try {
             await execution.syncFailureState(task, `Max rejection limit reached (${rejectionCount} attempts): ${feedback}`);
-            await linear.logBlocked(task.issueId, 'autonomous-runner',
+            await getTaskSource()?.logBlocked(task.issueId, 'autonomous-runner',
               `⚠️ **Max rejection limit reached (${rejectionCount} attempts)**\n\n` +
               `This task has been rejected ${rejectionCount} times by the reviewer and requires manual intervention.\n\n` +
               `**Latest rejection reason:**\n${feedback}\n\n` +
@@ -301,7 +300,7 @@ export class AutonomousRunner {
 
           try {
             await execution.syncFailureState(task, `Review rejected (${rejectionCount}/3): ${feedback}`);
-            await linear.logBlocked(task.issueId, 'autonomous-runner',
+            await getTaskSource()?.logBlocked(task.issueId, 'autonomous-runner',
               t('runner.reviewRejected', { feedback }) +
               `\n\n**Rejection count:** ${rejectionCount}/3 - Will retry automatically ${retryIn}.`
             );
@@ -326,7 +325,7 @@ export class AutonomousRunner {
           console.log(`[Scheduler] Task failure count: ${count}/${AutonomousRunner.MAX_RETRY_COUNT} for ${taskCtx} — BLOCKED`);
           try {
             await execution.syncFailureState(task, `Autonomous execution failed ${count} times`);
-            await linear.logBlocked(task.issueId, 'autonomous-runner',
+            await getTaskSource()?.logBlocked(task.issueId, 'autonomous-runner',
               `Autonomous execution failed ${count} times. Moving to Blocked for manual review.`
             );
             console.log(`[Scheduler] Issue ${task.issueId} marked as Todo (blocked) (max retries exceeded)`);
@@ -839,7 +838,7 @@ export class AutonomousRunner {
 
       // Claim the task immediately: set Linear to 'In Progress' so restarts don't re-queue it
       if (task.issueId) {
-        linear.updateIssueState(task.issueId, 'In Progress').catch((err: Error) =>
+        getTaskSource()?.updateState(task.issueId, 'In Progress').catch((err: Error) =>
           console.warn(`[AutonomousRunner] Failed to claim issue ${task.issueIdentifier}:`, err)
         );
       }
@@ -916,7 +915,7 @@ export class AutonomousRunner {
         if (result.success) {
           // On success, move to Done
           await execution.syncSuccessState(task);
-          await linear.logPairComplete(task.issueId, result.sessionId, {
+          await getTaskSource()?.logPairComplete(task.issueId, result.sessionId, {
             attempts: result.iterations,
             duration: Math.floor(result.totalDuration / 1000),
             filesChanged: result.workerResult?.filesChanged || [],
@@ -948,7 +947,7 @@ export class AutonomousRunner {
             task,
             `Review rejected: ${result.reviewResult?.feedback || t('common.fallback.noDescription')}`
           );
-          await linear.logBlocked(task.issueId, 'autonomous-runner',
+          await getTaskSource()?.logBlocked(task.issueId, 'autonomous-runner',
             t('runner.reviewRejected', { feedback: result.reviewResult?.feedback || t('common.fallback.noDescription') })
           );
           console.log(`[AutonomousRunner] Issue ${task.issueId} marked as Todo (blocked) (rejected)`);
