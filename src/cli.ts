@@ -58,25 +58,30 @@ program
 
 program
   .command('init')
-  .description('Generate a sample config.yaml in the current directory')
+  .description('Set up OpenSwarm (interactive wizard; --yes writes a sample config only)')
   .option('--force', 'Overwrite existing config file')
-  .action((opts: { force?: boolean }) => {
-    const configPath = join(process.cwd(), 'config.yaml');
-
-    if (existsSync(configPath) && !opts.force) {
-      console.error(`config.yaml already exists. Use --force to overwrite.`);
-      process.exit(1);
+  .option('--yes, --non-interactive', 'Skip the wizard: write a sample config.yaml only (CI)')
+  .action(async (opts: { force?: boolean; yes?: boolean; nonInteractive?: boolean }) => {
+    // Non-interactive: keep the original config-only behavior for CI / scripting.
+    if (opts.yes || opts.nonInteractive) {
+      const configPath = join(process.cwd(), 'config.yaml');
+      if (existsSync(configPath) && !opts.force) {
+        console.error(`config.yaml already exists. Use --force to overwrite.`);
+        process.exit(1);
+      }
+      writeFileSync(configPath, generateSampleConfig(), 'utf-8');
+      console.log(`Created ${configPath}`);
+      console.log('');
+      console.log('Next steps:');
+      console.log('  1. Set environment variables (DISCORD_TOKEN, LINEAR_API_KEY, etc.)');
+      console.log('  2. Edit config.yaml with your project paths');
+      console.log('  3. Run: openswarm validate');
+      console.log('  4. Run: openswarm start');
+      return;
     }
 
-    const content = generateSampleConfig();
-    writeFileSync(configPath, content, 'utf-8');
-    console.log(`Created ${configPath}`);
-    console.log('');
-    console.log('Next steps:');
-    console.log('  1. Set environment variables (DISCORD_TOKEN, LINEAR_API_KEY, etc.)');
-    console.log('  2. Edit config.yaml with your project paths');
-    console.log('  3. Run: openswarm validate');
-    console.log('  4. Run: openswarm start');
+    const { runInitWizard } = await import('./cli/initWizard.js');
+    await runInitWizard({ force: opts.force });
   });
 
 // openswarm validate

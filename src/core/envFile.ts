@@ -7,7 +7,7 @@
 // resolver. Existing process.env values are never overwritten — a shell
 // export always wins over the file.
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, chmodSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -84,6 +84,44 @@ function parseLine(line: string): [string, string] | null {
   const hash = value.indexOf(' #');
   if (hash >= 0) value = value.slice(0, hash).trimEnd();
   return [key, value];
+}
+
+/** Serialize a single KEY=value entry, double-quoting when the value needs it. */
+function formatEnvLine(key: string, value: string): string {
+  const needsQuote = value === '' || /[\s#"'$]/.test(value);
+  if (!needsQuote) return `${key}=${value}`;
+  const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return `${key}="${escaped}"`;
+}
+
+/**
+ * Upsert KEY=value pairs into a .env file (used by `openswarm init`). Existing
+ * lines for a key are replaced in place (order + comments preserved); new keys
+ * are appended. The file is written 0600 since it holds secrets.
+ */
+export function writeEnvVars(path: string, kv: Record<string, string>): void {
+  const existing = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  const lines = existing.length ? existing.split(/\r?\n/) : [];
+  const remaining = new Map(Object.entries(kv));
+
+  const out: string[] = [];
+  for (const line of lines) {
+    const parsed = parseLine(line);
+    if (parsed && remaining.has(parsed[0])) {
+      const key = parsed[0];
+      out.push(formatEnvLine(key, remaining.get(key)!));
+      remaining.delete(key);
+    } else {
+      out.push(line);
+    }
+  }
+  // Trim trailing blank lines before appending new keys.
+  while (out.length > 0 && out[out.length - 1].trim() === '') out.pop();
+  for (const [key, value] of remaining) out.push(formatEnvLine(key, value));
+
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, out.join('\n') + '\n', 'utf8');
+  chmodSync(path, 0o600);
 }
 
 /**
