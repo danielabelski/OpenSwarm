@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.14.0 — 2026-07-01
+
+### Added
+
+- **Auto-release on version bump** — a push to `main` that changes `package.json` now runs the gate (lint / typecheck / build) and automatically **publishes to npm + tags + creates a GitHub release** (notes sliced from this file). The release flow is just "merge a version-bump PR". Idempotent. Requires a repo secret `NPM_TOKEN`. (INT-2270)
+- **CLI update notifier** — when the running version is behind npm's latest, the CLI prints a two-line "update available" notice. 24h cached (`~/.openswarm/update-check.json`) so it's near-instant and non-blocking; skips non-TTY / CI / `--version` / `NO_UPDATE_NOTIFIER`. (INT-2270)
+
+### Changed
+
+- **`checkHandler` colors unified** onto the shared NO_COLOR/TTY-safe helper (`src/support/colors`), finishing the CLI/TUI status-consistency work — ~108 hand-rolled ANSI sites now go through `c` / `status`. Output is byte-identical when piped. (INT-2260)
+- **CI `test` job promoted to a hard gate** (the suite is green), and lint is now warning-free (36 → 0).
+
+### Fixed
+
+- **Stale `service.test.ts` provider-override tests** — the reapply lives inside the autonomous-start block; the tests drove it with a non-autonomous config. Fixed → the full suite is green (1315 passing). (INT-2271)
+- **`postbuild` `chmod +x dist/cli.js`** — a clean `rm -rf dist && build` no longer leaves the global CLI unexecutable ("permission denied").
+
 ## 0.13.0 — 2026-07-01
 
 ### Added

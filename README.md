@@ -512,9 +512,8 @@ the CLI (fire-and-forget with a short timeout, and failures are silently ignored
 Full version history lives in **[CHANGELOG.md](CHANGELOG.md)** and the
 [GitHub Releases](https://github.com/unohee/OpenSwarm/releases) page.
 
-Latest — **v0.13.0**: CLI agent runs (`run` / `fix` / `review --max`) now grow the
-per-repo knowledge memory, not just the daemon (`--no-learn` opts out). See
-CHANGELOG.md for the rest.
+Latest — **v0.14.0**: auto-release on version bump (merge → npm publish + tag +
+GitHub release) and a CLI update notifier. See CHANGELOG.md for the rest.
 
 ---
 
