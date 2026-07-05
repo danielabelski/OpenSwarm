@@ -58,7 +58,7 @@ describe('PairPipeline model selection', () => {
       success: true,
       summary: 'done',
       filesChanged: ['src/example.ts'],
-      commands: [],
+      commands: ['npm test -- src/example.test.ts'],
       output: '',
       confidencePercent: 100,
     });
@@ -274,6 +274,220 @@ describe('PairPipeline model selection', () => {
 
     expect(stageModels().every(m => m === 'explicit-worker')).toBe(true);
     expect(getDefaultModel).not.toHaveBeenCalled();
+  });
+
+  it('retries code-changing workers before review when validation commands are missing', async () => {
+    runWorker
+      .mockResolvedValueOnce({
+        success: true,
+        summary: 'changed code without checking it',
+        filesChanged: ['src/example.ts'],
+        commands: [],
+        output: '',
+        confidencePercent: 95,
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        summary: 'changed code and ran a focused test',
+        filesChanged: ['src/example.ts'],
+        commands: ['npm test -- src/example.test.ts'],
+        output: 'PASS src/example.test.ts',
+        confidencePercent: 95,
+      });
+
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker', 'reviewer'],
+      maxIterations: 2,
+      roles: {
+        worker: { enabled: true, model: 'worker', timeoutMs: 0 },
+        reviewer: { enabled: true, model: 'reviewer', timeoutMs: 0 },
+      },
+    });
+
+    const result = await pipeline.run(task(), process.cwd());
+
+    expect(result.success).toBe(true);
+    expect(runWorker).toHaveBeenCalledTimes(2);
+    expect(runReviewer).toHaveBeenCalledTimes(1);
+    expect(runWorker.mock.calls[1][0]).toEqual(expect.objectContaining({
+      previousFeedback: expect.stringContaining('validation evidence missing'),
+    }));
+  });
+
+  it('defers to the reviewer instead of hard-failing when validation evidence stays missing', async () => {
+    // A worker whose git changes were promoted to success with commands=[]
+    // (no JSON block) must not be killed after a couple of retries — the gate is
+    // a nudge, so once self-repair stagnates the reviewer gets the final say.
+    runWorker.mockResolvedValue({
+      success: true,
+      summary: 'changed code, never self-reported commands',
+      filesChanged: ['src/example.ts'],
+      commands: [],
+      output: '',
+      confidencePercent: 95,
+    });
+
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker', 'reviewer'],
+      maxIterations: 4,
+      roles: {
+        worker: { enabled: true, model: 'worker', timeoutMs: 0 },
+        reviewer: { enabled: true, model: 'reviewer', timeoutMs: 0 },
+      },
+    });
+
+    const result = await pipeline.run(task(), process.cwd());
+
+    // Reviewer approves → task succeeds despite never getting validation evidence.
+    expect(result.success).toBe(true);
+    expect(runReviewer).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not treat inspection-only commands as validation evidence', async () => {
+    runWorker
+      .mockResolvedValueOnce({
+        success: true,
+        summary: 'changed code after searching',
+        filesChanged: ['src/example.ts'],
+        commands: ['rg "npm test" package.json', 'git grep "cargo test"'],
+        output: '',
+        confidencePercent: 95,
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        summary: 'changed code and ran a script smoke check',
+        filesChanged: ['src/example.ts'],
+        commands: ['python scripts/smoke_example.py --dry-run'],
+        output: 'ok',
+        confidencePercent: 95,
+      });
+
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker', 'reviewer'],
+      maxIterations: 2,
+      roles: {
+        worker: { enabled: true, model: 'worker', timeoutMs: 0 },
+        reviewer: { enabled: true, model: 'reviewer', timeoutMs: 0 },
+      },
+    });
+
+    const result = await pipeline.run(task(), process.cwd());
+
+    expect(result.success).toBe(true);
+    expect(runWorker).toHaveBeenCalledTimes(2);
+    expect(runReviewer).toHaveBeenCalledTimes(1);
+    expect(runWorker.mock.calls[1][0]).toEqual(expect.objectContaining({
+      previousFeedback: expect.stringContaining('non-validation commands'),
+    }));
+  });
+
+  it('requires validation for build and dependency manifests without extensions', async () => {
+    runWorker
+      .mockResolvedValueOnce({
+        success: true,
+        summary: 'changed runtime manifests without checking them',
+        filesChanged: ['Dockerfile', 'Makefile', 'requirements.txt', 'go.mod', 'Cargo.lock'],
+        commands: [],
+        output: '',
+        confidencePercent: 95,
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        summary: 'changed manifests and ran a smoke build',
+        filesChanged: ['Dockerfile', 'Makefile', 'requirements.txt', 'go.mod', 'Cargo.lock'],
+        commands: ['npm run ci'],
+        output: 'ok',
+        confidencePercent: 95,
+      });
+
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker', 'reviewer'],
+      maxIterations: 2,
+      roles: {
+        worker: { enabled: true, model: 'worker', timeoutMs: 0 },
+        reviewer: { enabled: true, model: 'reviewer', timeoutMs: 0 },
+      },
+    });
+
+    const result = await pipeline.run(task(), process.cwd());
+
+    expect(result.success).toBe(true);
+    expect(runWorker).toHaveBeenCalledTimes(2);
+    expect(runReviewer).toHaveBeenCalledTimes(1);
+    expect(runWorker.mock.calls[1][0]).toEqual(expect.objectContaining({
+      previousFeedback: expect.stringContaining('requirements.txt'),
+    }));
+  });
+
+  it('still requires validation when tester is enabled but would skip manifest-only changes', async () => {
+    runWorker
+      .mockResolvedValueOnce({
+        success: true,
+        summary: 'changed package metadata without checking it',
+        filesChanged: ['package.json'],
+        commands: [],
+        output: '',
+        confidencePercent: 95,
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        summary: 'changed package metadata and ran ci',
+        filesChanged: ['package.json'],
+        commands: ['npm run ci'],
+        output: 'ok',
+        confidencePercent: 95,
+      });
+
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker', 'tester', 'reviewer'],
+      maxIterations: 2,
+      roles: {
+        worker: { enabled: true, model: 'worker', timeoutMs: 0 },
+        tester: { enabled: true, model: 'tester', timeoutMs: 0 },
+        reviewer: { enabled: true, model: 'reviewer', timeoutMs: 0 },
+      },
+    });
+
+    const result = await pipeline.run(task(), process.cwd());
+
+    expect(result.success).toBe(true);
+    expect(runWorker).toHaveBeenCalledTimes(2);
+    expect(runReviewer).toHaveBeenCalledTimes(1);
+    expect(runWorker.mock.calls[1][0]).toEqual(expect.objectContaining({
+      previousFeedback: expect.stringContaining('validation evidence missing'),
+    }));
+  });
+
+  it('allows docs-only workers to reach review without validation commands', async () => {
+    runWorker.mockResolvedValueOnce({
+      success: true,
+      summary: 'updated docs',
+      filesChanged: ['docs/usage.md'],
+      commands: [],
+      output: '',
+      confidencePercent: 95,
+    });
+
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker', 'reviewer'],
+      maxIterations: 1,
+      roles: {
+        worker: { enabled: true, model: 'worker', timeoutMs: 0 },
+        reviewer: { enabled: true, model: 'reviewer', timeoutMs: 0 },
+      },
+    });
+
+    const result = await pipeline.run(task({ title: 'Update docs' }), process.cwd());
+
+    expect(result.success).toBe(true);
+    expect(runWorker).toHaveBeenCalledTimes(1);
+    expect(runReviewer).toHaveBeenCalledTimes(1);
   });
 
   it('degrades to an undefined model when getDefaultModel fails', async () => {
