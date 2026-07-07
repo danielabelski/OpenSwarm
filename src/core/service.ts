@@ -26,6 +26,7 @@ import { Cron } from 'croner';
 import { setDefaultAdapter } from '../adapters/index.js';
 import { readProviderOverride, formatProviderOverrideMismatchWarning } from './providerOverride.js';
 import { enrichTaskFromState, hydrateTaskStateFromComments, updateTaskLinearState } from '../taskState/store.js';
+import { probeDaemonPort } from '../cli/daemon.js';
 
 let state: ServiceState = {
   running: false,
@@ -50,6 +51,25 @@ export function getPRProcessor(): PRProcessor | null {
  */
 export async function startService(config: SwarmConfig): Promise<void> {
   console.log('Starting OpenSwarm service...');
+
+  // Single-instance guard: refuse to start if another instance — however it was
+  // launched (`openswarm start`, launchd, or a stray manual `node dist/index.js`)
+  // — is already serving the API port. `openswarm start` already checks this via
+  // startDaemon(), but launchd's plist invokes `node dist/index.js` directly and
+  // a manual invocation skips the CLI entirely, so neither path went through that
+  // check. Real incident: a launchd kickstart spawned a second daemon alongside
+  // an already-running one; both raced on the same Linear queue AND the same
+  // unlocked local state files, silently losing each other's failure-counter
+  // writes so structurally-failing tasks never reached the STUCK threshold and
+  // retried forever instead. Checking here — the one path every invocation
+  // method shares — closes that gap for good. (INT-2570)
+  if (await probeDaemonPort()) {
+    throw new Error(
+      'Another OpenSwarm instance is already serving port 3847 — refusing to start a duplicate. ' +
+      "Check for stray processes ('ps aux | grep dist/index.js') or restart the managed one " +
+      "('launchctl kickstart -k gui/$UID/com.intrect.openswarm')."
+    );
+  }
 
   // Locale initialization
   initLocale(config.language);

@@ -76,6 +76,12 @@ vi.mock('./providerOverride.js', () => ({
   formatProviderOverrideMismatchWarning: vi.fn(() => 'provider-override mismatch (test)'),
 }));
 
+// Default: no other instance running, so existing tests exercise the normal
+// startup path unchanged. INT-2570's own tests override this per-case.
+vi.mock('../cli/daemon.js', () => ({
+  probeDaemonPort: vi.fn(async () => false),
+}));
+
 vi.mock('../automation/prProcessor.js', () => {
   class MockPRProcessor {
     start = vi.fn();
@@ -332,6 +338,40 @@ describe('service', () => {
       expect(stopCIWorker).toHaveBeenCalled();
       expect(stopAllSchedules).toHaveBeenCalled();
       expect(stopDiscord).toHaveBeenCalled();
+    });
+  });
+
+  // ============================================
+  // Single-instance guard (INT-2570)
+  // ============================================
+
+  describe('single-instance guard (INT-2570)', () => {
+    it('refuses to start when another instance already answers on the API port', async () => {
+      const { probeDaemonPort } = await import('../cli/daemon.js');
+      vi.mocked(probeDaemonPort).mockResolvedValueOnce(true);
+
+      await expect(startService(mockConfig)).rejects.toThrow(/already serving port 3847/);
+    });
+
+    it('does not touch Linear/Discord/web when a duplicate is detected', async () => {
+      const { probeDaemonPort } = await import('../cli/daemon.js');
+      const { initLinear } = await import('../linear/index.js');
+      const { initDiscord } = await import('../discord/index.js');
+      const { startWebServer } = await import('../support/web.js');
+      vi.mocked(probeDaemonPort).mockResolvedValueOnce(true);
+
+      await expect(startService(mockConfig)).rejects.toThrow();
+
+      expect(initLinear).not.toHaveBeenCalled();
+      expect(initDiscord).not.toHaveBeenCalled();
+      expect(startWebServer).not.toHaveBeenCalled();
+    });
+
+    it('starts normally when no other instance is detected', async () => {
+      const { probeDaemonPort } = await import('../cli/daemon.js');
+      vi.mocked(probeDaemonPort).mockResolvedValueOnce(false);
+
+      await expect(startService(mockConfig)).resolves.not.toThrow();
     });
   });
 

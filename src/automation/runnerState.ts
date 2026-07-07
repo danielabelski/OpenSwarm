@@ -3,10 +3,24 @@
 // Task state persistence + project info query
 // ============================================
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname, isAbsolute, relative, sep } from 'node:path';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
+
+/**
+ * Write-temp-then-rename instead of an in-place write, so a crash mid-write (or
+ * two processes racing on the same path) never leaves a truncated/corrupt JSON
+ * state file — a reader always sees either the old complete file or the new
+ * complete one, never a half-written one. The single-instance daemon guard
+ * (service.ts, INT-2570) is the primary defense against concurrent writers on
+ * these specific files; this is the cheap defense-in-depth for the crash case.
+ */
+function atomicWriteFileSync(path: string, content: string): void {
+  const tmpPath = `${path}.tmp-${process.pid}`;
+  writeFileSync(tmpPath, content, 'utf8');
+  renameSync(tmpPath, path);
+}
 
 /** Check if a resolved path matches or is under any enabled project path */
 export function isPathEnabled(resolvedPath: string, enabledProjects: Set<string>): boolean {
@@ -89,7 +103,7 @@ function ensurePaceLoaded(): PaceState {
 function savePace(): void {
   try {
     ensurePaceDir();
-    writeFileSync(DAILY_PACE_FILE, JSON.stringify(paceState, null, 2), 'utf8');
+    atomicWriteFileSync(DAILY_PACE_FILE, JSON.stringify(paceState, null, 2));
   } catch (err) {
     console.warn('[Pace] Failed to save:', err);
   }
@@ -118,7 +132,7 @@ export function loadProjectSelection(file: string = PROJECT_SELECTION_FILE): Pro
 export function saveProjectSelection(sel: ProjectSelection, file: string = PROJECT_SELECTION_FILE): void {
   try {
     ensureParentDir(file);
-    writeFileSync(file, JSON.stringify(sel, null, 2), 'utf8');
+    atomicWriteFileSync(file, JSON.stringify(sel, null, 2));
   } catch (err) {
     console.warn('[ProjectSelection] Failed to save:', err);
   }
@@ -260,7 +274,7 @@ export function saveTaskState(state: TaskState): void {
       updatedAt: new Date().toISOString(),
     };
     ensureParentDir(TASK_STATE_FILE);
-    writeFileSync(TASK_STATE_FILE, JSON.stringify(data, null, 2), 'utf8');
+    atomicWriteFileSync(TASK_STATE_FILE, JSON.stringify(data, null, 2));
   } catch (err) {
     console.warn('[AutonomousRunner] Failed to save task state:', err);
   }
@@ -347,7 +361,7 @@ export function incrementRejection(issueId: string, reason: string): number {
   // Persist to disk
   try {
     ensureParentDir(REJECTION_STATE_FILE);
-    writeFileSync(REJECTION_STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+    atomicWriteFileSync(REJECTION_STATE_FILE, JSON.stringify(state, null, 2));
   } catch (err) {
     console.warn('[RejectionState] Failed to save:', err);
   }
@@ -362,7 +376,7 @@ export function clearRejection(issueId: string): void {
 
   try {
     ensureParentDir(REJECTION_STATE_FILE);
-    writeFileSync(REJECTION_STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+    atomicWriteFileSync(REJECTION_STATE_FILE, JSON.stringify(state, null, 2));
   } catch (err) {
     console.warn('[RejectionState] Failed to save:', err);
   }
@@ -455,7 +469,7 @@ function resetDailyCounterIfNeeded(): void {
     state.updatedAt = new Date().toISOString();
     try {
       ensureParentDir(DECOMPOSITION_STATE_FILE);
-      writeFileSync(DECOMPOSITION_STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+      atomicWriteFileSync(DECOMPOSITION_STATE_FILE, JSON.stringify(state, null, 2));
     } catch (err) {
       console.warn('[DecompositionState] Failed to persist daily reset:', err);
     }
@@ -514,7 +528,7 @@ export function registerDecomposition(
   // Persist to disk
   try {
     ensureParentDir(DECOMPOSITION_STATE_FILE);
-    writeFileSync(DECOMPOSITION_STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+    atomicWriteFileSync(DECOMPOSITION_STATE_FILE, JSON.stringify(state, null, 2));
   } catch (err) {
     console.warn('[DecompositionState] Failed to save:', err);
   }
@@ -548,7 +562,7 @@ export function appendPipelineHistory(entry: PipelineHistoryEntry): void {
   }
   try {
     ensureParentDir(PIPELINE_HISTORY_FILE);
-    writeFileSync(PIPELINE_HISTORY_FILE, JSON.stringify(history, null, 2), 'utf8');
+    atomicWriteFileSync(PIPELINE_HISTORY_FILE, JSON.stringify(history, null, 2));
   } catch (err) {
     console.warn('[PipelineHistory] Failed to save:', err);
   }

@@ -111,6 +111,19 @@ describe('runnerState persistence and helpers', () => {
     expect(saved.lastFailures.worse.detail).toBe('reviewer said: wrong API shape');
   });
 
+  it('writes state files via temp-then-rename, leaving no leftover .tmp file (INT-2570)', () => {
+    const state = {
+      completedTaskIds: new Set(['x']),
+      failedTaskCounts: new Map<string, number>(),
+      failedTaskRetryTimes: new Map<string, number>(),
+      lastFailureDetails: new Map<string, { detail: string; at: string }>(),
+    };
+    mod.saveTaskState(state);
+    expect(existsSync(mod.TASK_STATE_FILE)).toBe(true);
+    expect(existsSync(`${mod.TASK_STATE_FILE}.tmp-${process.pid}`)).toBe(false);
+    expect(JSON.parse(readFileSync(mod.TASK_STATE_FILE, 'utf8')).completed).toEqual(['x']);
+  });
+
   it('caps recorded failure detail and ignores blank details', () => {
     const state = {
       completedTaskIds: new Set<string>(),
