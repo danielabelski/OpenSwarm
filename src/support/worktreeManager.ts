@@ -6,7 +6,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { registerOwnedPR } from '../automation/prOwnership.js';
 import { runConventionalCommitGuard } from '../agents/pipelineGuards.js';
 import { loadRepoMetadata } from './repoMetadata.js';
@@ -95,7 +95,7 @@ export function buildBranchName(issueIdentifier: string, title: string): string 
 
 function isPathInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
-  return rel === '' || (!!rel && !rel.startsWith('..') && !isAbsolute(rel));
+  return rel === '' || (!!rel && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 function worktreeRoot(repoPath: string): string {
@@ -329,6 +329,12 @@ export async function createWorktree(
   if (existsSync(worktreePath)) {
     await git(repoPath, 'worktree', 'remove', '--force', worktreePath).catch((e) => console.warn(`[Worktree] Failed to remove existing worktree: ${worktreePath}`, e));
     rmSync(worktreePath, { recursive: true, force: true });
+    // A broken worktree .git pointer can make `worktree remove` fail while its
+    // admin entry remains registered. Prune after the direct-removal fallback
+    // so the old branch is no longer considered in use and retry can recreate it.
+    await git(repoPath, 'worktree', 'prune').catch((e) =>
+      console.warn(`[Worktree] Failed to prune stale worktree metadata: ${worktreePath}`, e)
+    );
   }
 
   // Always create fresh branch from latest main to avoid conflicts
@@ -407,6 +413,42 @@ export interface BranchScope {
 export interface FileOverlap {
   label: string;
   files: string[];
+}
+
+export interface OpenPRFileOverlap extends FileOverlap {
+  number: number;
+  url: string;
+}
+
+/**
+ * Check planned files before a worker branch is created. This is intentionally
+ * fail-open when GitHub is unavailable, but a successful query lets the runner
+ * avoid producing another divergent implementation of the same files.
+ */
+export async function findOpenPRFileOverlaps(
+  repoPath: string,
+  plannedFiles: string[],
+): Promise<OpenPRFileOverlap[]> {
+  if (plannedFiles.length === 0) return [];
+  const planned = new Set(plannedFiles.map((f) => f.replace(/^\.\//, '')));
+  try {
+    // `files` is available on `gh pr list --json`; fetch every scope in one API
+    // request instead of running an unbounded `gh pr diff` loop.
+    // gh paginates internally up to the requested limit. 1,000 is a deliberate
+    // safety ceiling well above GitHub's practical open-PR queue sizes while
+    // keeping one bounded request and covering the former 100-PR blind spot.
+    const raw = await gh(repoPath, 'pr', 'list', '--state', 'open', '--json', 'number,url,headRefName,files', '--limit', '1000');
+    const prs: { number: number; url: string; headRefName: string; files?: { path: string }[] }[] = JSON.parse(raw || '[]');
+    const overlaps: OpenPRFileOverlap[] = [];
+    for (const pr of prs) {
+      const shared = (pr.files ?? []).map((f) => f.path).filter((f) => planned.has(f.replace(/^\.\//, '')));
+      if (shared.length > 0) overlaps.push({ number: pr.number, url: pr.url, label: `PR #${pr.number} (${pr.headRefName})`, files: shared });
+    }
+    return overlaps;
+  } catch (err) {
+    console.warn('[Worktree] Preflight open-PR overlap check skipped:', err);
+    return [];
+  }
 }
 
 /** Pure: intersect this branch's changed files with each other scope's files. */

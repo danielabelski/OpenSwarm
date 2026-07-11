@@ -15,6 +15,8 @@ import { RateLimitError } from '../adapters/rateLimitError.js';
 import { isInfraError } from '../adapters/errorClassification.js';
 import { resolveEditFormat, SEARCH_REPLACE_PROMPT, WHOLE_FILE_PROMPT, type EditFormat } from '../support/editParser.js';
 import { loadSandboxBashTimeoutMs } from '../support/repoMetadata.js';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 // Types
 
@@ -41,6 +43,8 @@ export interface WorkerOptions {
   nudgeMaxOnNoEdit?: number;
   /** Verification-harness file protection — listed files reject edit/write */
   protectedFiles?: string[];
+  /** Planner-declared files/modules this task may edit. */
+  fileScope?: string[];
   /** bash tool timeout in ms — raise for slow verification such as docker-based tests */
   bashTimeoutMs?: number;
   /** Expose web_fetch + web_search tools (default true). Set false for SWE-bench integrity. */
@@ -70,6 +74,41 @@ export interface WorkerOptions {
  * "live/E2E verification" the worker could never physically complete.
  */
 export const WORKER_BASH_TIMEOUT_DEFAULT_MS = 300_000;
+
+const REPO_RULE_FILES = ['AGENTS.md', 'CLAUDE.md'] as const;
+const REPO_RULES_MAX_CHARS = 12_000;
+
+/** Load binding repository instructions into the autonomous worker prompt. */
+export function loadWorkerRepoRules(projectPath: string): string {
+  const sections: string[] = [];
+  for (const name of REPO_RULE_FILES) {
+    const path = join(projectPath, name);
+    if (!existsSync(path)) continue;
+    try {
+      const full = readFileSync(path, 'utf8').trim();
+      if (!full) continue;
+      const body = full.length > REPO_RULES_MAX_CHARS
+        ? `${full.slice(0, REPO_RULES_MAX_CHARS)}\n… (truncated — read ${name} before editing)`
+        : full;
+      sections.push(`## Binding repository instructions (${name})\n${body}`);
+    } catch {
+      // Best-effort: the base prompt still tells the worker to read repo rules.
+    }
+  }
+  return sections.length > 0 ? `\n\n${sections.join('\n\n')}` : '';
+}
+
+/** Keep Git as the sole changed-file authority and enforce planner scope. */
+export function reconcileWorkerFiles(
+  gitChangedFiles: string[],
+  fileScope: string[] = [],
+): { filesChanged: string[]; outsideScope: string[] } {
+  const filesChanged = [...gitChangedFiles];
+  const scope = fileScope.map((file) => file.replace(/^\.\//, '').replace(/\/$/, ''));
+  const outsideScope = scope.length === 0 ? [] : filesChanged.filter((file) =>
+    !scope.some((allowed) => file === allowed || file.startsWith(`${allowed}/`)));
+  return { filesChanged, outsideScope };
+}
 
 /** jobProfile effort → bash timeout. Heavier tasks get longer verification budgets. */
 const EFFORT_BASH_TIMEOUT_MS: Record<'low' | 'medium' | 'high', number> = {
@@ -177,7 +216,7 @@ function emitWorkerStatus(options: WorkerOptions, line: string): void {
 }
 
 export function formatWorkerGitChangeStatus(files: string[]): string {
-  if (files.length === 0) return '[Worker] No file changes detected by Git or LLM';
+  if (files.length === 0) return '[Worker] No file changes detected by Git';
   const shown = files.slice(0, 4).join(', ');
   const more = files.length > 4 ? ` +${files.length - 4} more` : '';
   return `[Worker] Git detected ${files.length} changed file(s): ${shown}${more}`;
@@ -218,7 +257,7 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
     // or whole-file instruction is appended to the worker's system prompt so the
     // model emits the format the agentic loop expects.
     const editFormat = options.editFormat ?? resolveEditFormat(adapterName);
-    let systemPrompt = getPrompts().systemPrompt;
+    let systemPrompt = getPrompts().systemPrompt + loadWorkerRepoRules(cwd);
     if (editFormat === 'search-replace') systemPrompt += SEARCH_REPLACE_PROMPT;
     else if (editFormat === 'whole-file') systemPrompt += WHOLE_FILE_PROMPT;
 
@@ -264,15 +303,18 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
     if (isGitRepo && snapshotHash) {
       const gitChangedFiles = await gitTracker.getChangedFilesSinceSnapshot(cwd, snapshotHash);
 
+      const { filesChanged, outsideScope } = reconcileWorkerFiles(gitChangedFiles, options.fileScope);
+      parsedResult.filesChanged = filesChanged;
+
       if (gitChangedFiles.length > 0) {
         emitWorkerStatus(options, formatWorkerGitChangeStatus(gitChangedFiles));
 
-        // Merge with LLM-reported files (Git results take priority)
-        const mergedFiles = new Set([
-          ...gitChangedFiles,
-          ...parsedResult.filesChanged,
-        ]);
-        parsedResult.filesChanged = Array.from(mergedFiles);
+        // Git is authoritative. Model-reported paths may be hallucinated or may
+        // name another task's sibling worktree (INT-2609); never merge them back.
+        if (outsideScope.length > 0) {
+          parsedResult.success = false;
+          parsedResult.error = `worker-scope: changed files outside declared fileScope: ${outsideScope.join(', ')}`;
+        }
 
         // Real file changes + no explicit error signal → treat as success even if
         // the model never produced a JSON block. Only an explicit error/halt in the
@@ -286,6 +328,11 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
         }
       } else if (parsedResult.filesChanged.length === 0) {
         emitWorkerStatus(options, formatWorkerGitChangeStatus([]));
+      }
+
+      if (parsedResult.success && parsedResult.filesChanged.length === 0 && !parsedResult.noChangesReason?.trim()) {
+        parsedResult.success = false;
+        parsedResult.error = 'Worker reported success with no changed files and no explicit noChangesReason.';
       }
     }
 

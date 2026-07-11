@@ -7,6 +7,8 @@ import {
   buildProjectsInfo,
   appendPipelineHistory,
   getPipelineHistory,
+  aggregateFailureCauses,
+  classifyFailureCause,
   incrementRejection,
   clearRejection,
   getRejectionCount,
@@ -60,6 +62,7 @@ import { resolveAdapterDefaultModel } from '../agents/stageModelResolver.js';
 import type { AutonomousConfig, RunnerState } from './runnerTypes.js';
 import type { AdapterName } from '../adapters/types.js';
 import { mapModelForProvider as mapModelForAdapter } from '../adapters/modelCompat.js';
+import { isTimeoutError } from '../adapters/errorClassification.js';
 import {
   applyBacklogGrooming,
   filterGroomableTasks,
@@ -301,9 +304,10 @@ export class AutonomousRunner {
         recordProjectCompletion(projectName, result.totalCost?.costUsd);
       }
 
-      // Skip completion handling for decomposed tasks. Child issues represent the runnable work.
+      // Skip completion handling when another open PR already owns the planned
+      // files. Both cases have a different coordination surface for completion.
       if (result.finalStatus === 'decomposed') {
-        console.log(`[Scheduler] Task decomposed into sub-issues, skipping Done state`);
+        console.log(`[Scheduler] Task ${result.finalStatus}; skipping Done state`);
         this.scheduleNextHeartbeat();
         return;
       }
@@ -360,6 +364,16 @@ export class AutonomousRunner {
       this.scheduleNextHeartbeat();
     });
 
+    this.scheduler.on('superseded', async ({ task, result }) => {
+      const taskCtx = this.formatTaskContext(task);
+      console.log(`[Scheduler] Task superseded: ${taskCtx} ${task.title}`);
+      this.recordPipelineHistory(task, result);
+      if (task.issueId) setRetryTime(task.issueId, 3, this.failedTaskRetryTimes);
+      this.saveTaskState();
+      broadcastEvent({ type: 'log', data: { taskId: task.issueId || task.id, stage: 'preflight', line: 'Existing open PR owns planned files; deferred for re-check' } });
+      this.scheduleNextHeartbeat();
+    });
+
     this.scheduler.on('cancelled', async ({ task, result }) => {
       const taskCtx = this.formatTaskContext(task);
       console.log(`[Scheduler] Task cancelled: ${taskCtx} ${task.title}`);
@@ -374,6 +388,7 @@ export class AutonomousRunner {
 
     this.scheduler.on('failed', async ({ task, result }) => {
       const taskCtx = this.formatTaskContext(task);
+      this.recordPipelineHistory(task, result);
 
       // Rate-limited: pause execution until the quota resets. Do NOT count it as a
       // task failure, run the rejection/block path, or post a Linear comment —
@@ -414,7 +429,6 @@ export class AutonomousRunner {
 
       console.log(`[Scheduler] Task failed: ${taskCtx} ${task.title}`);
       broadcastEvent({ type: 'task:completed', data: { taskId: task.id, success: false, duration: result.totalDuration } });
-      this.recordPipelineHistory(task, result);
       await reportToDiscord(formatPipelineResultEmbed(result));
 
       // Structural infeasibility (⑦, INT-2521): the failure text says the DoD can't
@@ -519,7 +533,7 @@ export class AutonomousRunner {
           this.saveTaskState();
 
           try {
-            await execution.syncFailureState(task, `Review rejected (${rejectionCount}/3): ${feedback}`);
+            await execution.syncFailureState(task, `Review rejected (${rejectionCount}/3): ${feedback}`, 'Todo');
             await getTaskSource()?.logBlocked(task.issueId, 'autonomous-runner',
               t('runner.reviewRejected', { feedback }) +
               `\n\n**Rejection count:** ${rejectionCount}/3 - Will retry automatically ${retryIn}.`
@@ -577,6 +591,7 @@ export class AutonomousRunner {
           const retryIn = formatRetryTime(nextRetryTime);
           console.log(`[Scheduler] Task failure count: ${count}/${AutonomousRunner.MAX_RETRY_COUNT} for ${taskCtx} — retry ${retryIn}`);
           this.saveTaskState();
+          await execution.syncFailureState(task, `Autonomous execution failed ${count}/${AutonomousRunner.MAX_RETRY_COUNT}: ${failureDetail}`, 'Todo');
         }
       }
 
@@ -595,9 +610,16 @@ export class AutonomousRunner {
       this.scheduleNextHeartbeat();
     });
 
-    this.scheduler.on('error', async ({ task, error }) => {
+    this.scheduler.on('error', async ({ task, error, startedAt, projectPath }) => {
       const taskCtx = this.formatTaskContext(task);
       console.error(`[Scheduler] Task error: ${taskCtx} ${task.title}`, error);
+      const timeout = isTimeoutError(error);
+      this.recordPipelineHistory(task, {
+        success: false, sessionId: `scheduler-error-${task.id}-${Date.now()}`, stages: [],
+        finalStatus: timeout ? 'infra_error' : 'failed', failureSignal: timeout ? 'timeout' : undefined,
+        totalDuration: Math.max(0, Date.now() - startedAt), iterations: 0,
+        taskContext: { issueIdentifier: task.issueIdentifier || task.issueId, projectName: task.linearProject?.name, projectPath, taskTitle: task.title },
+      });
       await reportToDiscord(t('runner.pipelineError', { title: `${taskCtx} ${task.title}`, error: error.message }));
     });
 
@@ -1486,7 +1508,8 @@ export class AutonomousRunner {
           // Change to Blocked on review rejection
           await execution.syncFailureState(
             task,
-            `Review rejected: ${result.reviewResult?.feedback || t('common.fallback.noDescription')}`
+            `Review rejected: ${result.reviewResult?.feedback || t('common.fallback.noDescription')}`,
+            'Todo',
           );
           await getTaskSource()?.logBlocked(task.issueId, 'autonomous-runner',
             t('runner.reviewRejected', { feedback: result.reviewResult?.feedback || t('common.fallback.noDescription') })
@@ -1518,6 +1541,7 @@ export class AutonomousRunner {
       worktreeMode: this.config.worktreeMode ?? false,
       scheduleNextHeartbeat: () => this.scheduleNextHeartbeat(),
       guards: this.config.guards,
+      verify: this.config.verify,
       maxReflections: this.config.maxReflections,
     };
   }
@@ -1740,8 +1764,14 @@ export class AutonomousRunner {
   getQueuedTasks() { return this.scheduler.getQueuedTasks(); }
   getRunningTasks() { return this.scheduler.getRunningTasks(); }
   getPipelineHistory(limit = 50) { return getPipelineHistory(limit); }
+  getFailureCauseSummary(limit = 50) { return aggregateFailureCauses(getPipelineHistory(limit)); }
 
   private recordPipelineHistory(task: TaskItem, result: PipelineResult): void {
+    const failureCause = classifyFailureCause({
+      success: result.success, finalStatus: result.finalStatus, failureSignal: result.failureSignal,
+      workerFilesChanged: result.workerResult?.filesChanged?.length,
+      reviewerDecision: result.reviewResult?.decision,
+    });
     appendPipelineHistory({
       sessionId: result.sessionId, issueIdentifier: task.issueIdentifier || task.issueId,
       issueId: task.issueId, taskTitle: task.title, projectName: task.linearProject?.name,
@@ -1752,6 +1782,7 @@ export class AutonomousRunner {
       cost: result.totalCost ? { costUsd: result.totalCost.costUsd,
         inputTokens: result.totalCost.inputTokens, outputTokens: result.totalCost.outputTokens } : undefined,
       prUrl: result.prUrl, reviewerFeedback: result.reviewResult?.feedback,
+      failureCause,
       completedAt: new Date().toISOString(),
     });
   }

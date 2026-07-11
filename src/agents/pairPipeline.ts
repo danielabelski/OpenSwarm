@@ -2,7 +2,6 @@
 // OpenSwarm - Pair Pipeline
 // Worker → Reviewer → Tester → Documenter pipeline
 // ============================================
-
 import { EventEmitter } from 'node:events';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { WorkerResult, ReviewResult } from './agentPair.js';
@@ -12,7 +11,6 @@ import type { AuditorResult } from './auditor.js';
 import type { SkillDocumenterResult } from './skillDocumenter.js';
 import type { PipelineStage, PipelineGuardsConfig, JobProfile } from '../core/types.js';
 import { type CostInfo, aggregateCosts, formatCost } from '../support/costTracker.js';
-
 import { broadcastEvent } from '../core/eventHub.js';
 import { CONFIDENCE_THRESHOLDS } from './agentPair.js';
 import * as agentPair from './agentPair.js';
@@ -49,15 +47,16 @@ import * as auditorAgent from './auditor.js';
 import * as skillDocumenterAgent from './skillDocumenter.js';
 import { StuckDetector, createStuckDetector } from '../support/stuckDetector.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
-import { isInfraError } from '../adapters/errorClassification.js';
+import { isInfraError, isTimeoutError } from '../adapters/errorClassification.js';
 import { resolveAdapterDefaultModel } from './stageModelResolver.js';
+import { captureVerifyInputFingerprint, loadTrustedVerifyPlan, runTesterWithVerification } from './deterministicTester.js';
 import { isClassifiedStageError, rethrowClassified, extractClassifiedStageResult, PipelineCancelledError } from './stageErrorClassification.js';
 import {
   isTesterCodeFile,
+  isValidationRelevantFile,
   missingWorkerValidationIssues,
   testerWouldRunForWorkerResult,
 } from './workerValidationEvidence.js';
-
 export { PipelineCancelledError };
 export type {
   PipelineConfig,
@@ -67,13 +66,9 @@ export type {
   PipelineRunMetadata,
   StageResult,
 } from './pairPipelineTypes.js';
-
 export { buildTaskPrefix } from './pipelineTaskPrefix.js';
 export { stageTimeoutMs } from './stageTimeouts.js';
 import { stageTimeoutMs } from './stageTimeouts.js';
-
-// Pair Pipeline
-
 export class PairPipeline extends EventEmitter {
   private config: PipelineConfig;
   private stuckDetector: StuckDetector;
@@ -82,7 +77,6 @@ export class PairPipeline extends EventEmitter {
   private abortSignal?: AbortSignal;
   /** Cache of adapter default models (heavy: OAuth + live catalog) keyed by adapter name. (INT-2393) */
   private defaultModelCache = new Map<string, Promise<string | undefined>>();
-
   /** Throw if this run has been cancelled. Called at iteration/stage boundaries. */
   private throwIfAborted(): void {
     if (this.abortSignal?.aborted) throw new PipelineCancelledError();
@@ -161,7 +155,6 @@ export class PairPipeline extends EventEmitter {
       }
     }
 
-    // Create session
     const session = agentPair.createPairSession({
       taskId: task.issueIdentifier || task.issueId || task.id,
       taskTitle: task.title,
@@ -175,7 +168,6 @@ export class PairPipeline extends EventEmitter {
     });
 
     const taskPrefix = buildTaskPrefix(task, projectPath);
-
     const context: PipelineContext = {
       task,
       projectPath,
@@ -185,15 +177,17 @@ export class PairPipeline extends EventEmitter {
       taskPrefix,
       reflection: createReflectionState(),
     };
-
     try {
-      // Full iteration loop: Worker → Reviewer → Tester
+      if (this.config.verify?.enabled) try {
+        const plan = await loadTrustedVerifyPlan(projectPath, this.config.verify);
+        context.trustedVerifyCommands = plan.commands; context.trustedVerifyPackageJsonByDirectory = plan.packageJsonByDirectory;
+        context.trustedVerifyInputFingerprint = await captureVerifyInputFingerprint(projectPath);
+      } catch (error) { context.trustedVerifyError = error; }
       const iterationResult = await this.runFullIterationLoop(context, stages);
 
       if (!iterationResult.success) {
         return this.buildResult(context, stages, startTime);
       }
-
       // Run Documenter after all stages pass
       if (this.hasStage('documenter') && context.workerResult?.success) {
         if (this.config.skipDocumenterIfNoChange && !context.workerResult.filesChanged?.length) {
@@ -251,6 +245,7 @@ export class PairPipeline extends EventEmitter {
         sessionId: session.id,
         stages,
         finalStatus: cancelled ? 'cancelled' : rateLimited ? 'rate_limited' : infra ? 'infra_error' : 'failed',
+        failureSignal: isTimeoutError(error) ? 'timeout' : undefined,
         rateLimitResetsAt: rateLimited && (error as RateLimitError).resetsAt
           ? (error as RateLimitError).resetsAt! * 1000
           : undefined,
@@ -269,11 +264,6 @@ export class PairPipeline extends EventEmitter {
       };
     }
   }
-
-  // ============================================
-  // Stage Execution
-  // ============================================
-
   /**
    * Worker에 주입할 코드 컨텍스트 수집
    * Draft 분석이 있으면 재사용, 없으면 직접 수집
@@ -381,13 +371,10 @@ export class PairPipeline extends EventEmitter {
     }
   }
 
-  /**
-   * Check if a stage is enabled
-   */
+  /** Check if a stage is enabled. */
   private hasStage(stage: PipelineStage): boolean {
     return this.config.stages.includes(stage);
   }
-
   /** Post-success non-blocking stage: its failure (incl. rate-limit/infra) must
    *  NEVER revert the approved task; only cancellation propagates. (INT-2521) */
   private async runPostSuccessStage(stage: PipelineStage, context: PipelineContext, stages: StageResult[]): Promise<void> {
@@ -398,9 +385,25 @@ export class PairPipeline extends EventEmitter {
     }
   }
 
-  /**
-   * Run a single stage
-   */
+  private async runTester(context: PipelineContext): Promise<TesterResult> {
+    if (!context.workerResult) throw new Error('Worker result required for tester');
+    if (context.trustedVerifyError) throw context.trustedVerifyError;
+    return await runTesterWithVerification({
+      projectPath: context.projectPath,
+      verify: this.config.verify,
+      trustedCommands: context.trustedVerifyCommands, trustedPackageJsonByDirectory: context.trustedVerifyPackageJsonByDirectory,
+      trustedInputFingerprint: context.trustedVerifyInputFingerprint,
+      onInfra: (error) => console.warn(`[${context.taskPrefix}] Deterministic verify unavailable; falling back to LLM tester: ${error instanceof Error ? error.message : String(error)}`),
+      fallback: () => testerAgent.runTester({
+        taskTitle: context.task.title, taskDescription: context.task.description || '',
+        workerResult: context.workerResult!, projectPath: context.projectPath,
+        timeoutMs: stageTimeoutMs('tester', this.config.roles?.tester?.timeoutMs),
+        model: this.config.roles?.tester?.model, maxTurns: this.config.roles?.tester?.maxTurns,
+        adapterName: this.config.roles?.tester?.adapter,
+      }),
+    });
+  }
+  /** Run a single stage. */
   private async runStage(
     stage: PipelineStage,
     context: PipelineContext,
@@ -421,7 +424,6 @@ export class PairPipeline extends EventEmitter {
     if (this.config.verbose) {
       this.emit('log', { line: `[verbose] Stage: ${stage} | model: ${stageModel ?? 'default'} | iteration: ${context.currentIteration}` });
     }
-
     try {
       let result: WorkerResult | ReviewResult | TesterResult | DocumenterResult | AuditorResult | SkillDocumenterResult;
 
@@ -498,6 +500,7 @@ export class PairPipeline extends EventEmitter {
             // codex spark AND gpt-5.5 both read 30-37× and shipped 0 edits. Push the
             // worker to actually edit before concluding.
             nudgeMaxOnNoEdit: 3,
+            fileScope: context.task.fileScope,
             issueIdentifier: context.task.issueIdentifier || context.task.issueId,
             projectName: context.task.linearProject?.name,
             onLog,
@@ -570,11 +573,12 @@ export class PairPipeline extends EventEmitter {
             projectPath: context.projectPath,
             timeoutMs: stageTimeoutMs('reviewer', this.config.roles?.reviewer?.timeoutMs),
             // jobProfile model precedence (see worker stage above). (INT-1599)
-            model: this.getModelForRole('reviewer', context.task),
+            model: overrides?.model ?? this.getModelForRole('reviewer', context.task),
             maxTurns: reviewerMaxTurns,
             adapterName: this.config.roles?.reviewer?.adapter,
             reasoningEffort: this.getEffortForTask(context.task),
             completionCriteria: this.config.draftAnalysis?.completionCriteria,
+            verificationEvidence: context.testerResult?.verificationEvidence,
             // Surface non-blocking guard warnings (dead-module, reformat/scope)
             // so the reviewer verifies them instead of them dying in a log. (INT-2388)
             guardWarnings: context.guardsResult?.results
@@ -604,25 +608,13 @@ export class PairPipeline extends EventEmitter {
           break;
 
         case 'tester':
-          if (!context.workerResult) {
-            throw new Error('Worker result required for tester');
-          }
-          result = await testerAgent.runTester({
-            taskTitle: context.task.title,
-            taskDescription: context.task.description || '',
-            workerResult: context.workerResult,
-            projectPath: context.projectPath,
-            timeoutMs: stageTimeoutMs('tester', this.config.roles?.tester?.timeoutMs),
-            model: this.config.roles?.tester?.model,
-            maxTurns: this.config.roles?.tester?.maxTurns,
-            adapterName: this.config.roles?.tester?.adapter,
-          });
+          result = await this.runTester(context);
           context.testerResult = result as TesterResult;
 
           // Verbose: emit tester details
           if (this.config.verbose) {
             const tr = result as TesterResult;
-            this.emit('log', { line: `[verbose] Tests passed: ${tr.testsPassed}, failed: ${tr.testsFailed}${tr.coverage != null ? `, coverage: ${tr.coverage}%` : ''}` });
+            this.emit('log', { line: `[verbose] Tests passed: ${tr.testsPassed}, failed: ${tr.testsFailed}${tr.coverage != null ? `, coverage: ${tr.coverage}%` : ''}${tr.deterministic ? ' (deterministic)' : ''}` });
           }
           break;
 
@@ -984,7 +976,7 @@ export class PairPipeline extends EventEmitter {
       if (hasReviewer && context.workerResult && !testerWouldRunForWorkerResult(
         context.workerResult,
         hasTester,
-        this.config.skipTesterIfNoCodeChange ?? true
+        this.config.skipTesterIfNoCodeChange ?? true, this.config.verify?.enabled === true,
       )) {
         const validationIssues = missingWorkerValidationIssues(context.workerResult);
         if (validationIssues.length > 0) {
@@ -1067,14 +1059,17 @@ export class PairPipeline extends EventEmitter {
         // Skip tester if no code files changed (configurable, default true)
         const skipIfNoCode = this.config.skipTesterIfNoCodeChange ?? true;
         const changedFiles = context.workerResult?.filesChanged || [];
-        const hasCodeChange = changedFiles.some(isTesterCodeFile);
+        const hasCodeChange = changedFiles.some(file => this.config.verify?.enabled
+          ? isValidationRelevantFile(file)
+          : isTesterCodeFile(file));
         if (skipIfNoCode && !hasCodeChange) {
           console.log(`[${context.taskPrefix}] Skipping tester: no code files changed (${changedFiles.length} files: ${changedFiles.join(', ') || 'none'})`);
         } else {
         const testerResult = await this.runStage('tester', context);
         stages.push(testerResult);
 
-        if (!testerResult.success && !this.config.continueOnTestFail) {
+        const reviewerShouldJudgeFailure = context.testerResult?.deterministic === true;
+        if (!testerResult.success && !this.config.continueOnTestFail && !reviewerShouldJudgeFailure) {
           // Test failure is objective ground truth → record into the reflection
           // trail and drive a bounded self-repair retry (INT-1679).
           console.log(`[${context.taskPrefix}] Tester failed, retrying...`);
@@ -1229,11 +1224,17 @@ export class PairPipeline extends EventEmitter {
           continue;
         }
 
-        // approve → done (tester already ran before the reviewer — INT-1703)
         agentPair.resetFailureStreak(context.session.id); // Reset on approval
       }
 
-      // ========== ALL PASSED ==========
+      if (context.testerResult?.deterministic === true
+        && context.testerResult.success === false
+        && this.config.verify?.blockOnNewFailures === true) {
+        console.log(`[${context.taskPrefix}] Deterministic verification has a blocking new failure`);
+        this.emit('iteration:fail', { iteration: context.currentIteration, stage: 'tester', context });
+        agentPair.updateSessionStatus(context.session.id, 'failed');
+        return { success: false };
+      }
       console.log(`[${context.taskPrefix}] Iteration ${context.currentIteration} completed successfully`);
       this.emit('iteration:complete', {
         iteration: context.currentIteration,
@@ -1242,15 +1243,10 @@ export class PairPipeline extends EventEmitter {
       return { success: true };
     }
 
-    // maxIterations exceeded
     console.log(`[${context.taskPrefix}] Max iterations (${maxIterations}) exceeded`);
     agentPair.updateSessionStatus(context.session.id, 'failed');
     return { success: false };
   }
-
-  // ============================================
-  // Result Building
-  // ============================================
 
   /**
    * Build pipeline result
@@ -1287,6 +1283,7 @@ export class PairPipeline extends EventEmitter {
       sessionId: context.session.id,
       stages,
       finalStatus,
+      failureSignal: context.guardsResult?.results.some(r => r.blocking && !r.passed) || context.testerResult?.success === false ? 'gate-fail' : undefined,
       totalDuration: Date.now() - startTime,
       iterations: context.currentIteration,
       workerResult: context.workerResult,
@@ -1353,6 +1350,7 @@ export function createPipelineFromConfig(
   draftAnalysis?: PipelineConfig['draftAnalysis'],
   maxReflections?: number,
   runMetadata?: PipelineRunMetadata,
+  verify?: PipelineConfig['verify'],
 ): PairPipeline {
   const stages: PipelineStage[] = [];
 
@@ -1362,7 +1360,7 @@ export function createPipelineFromConfig(
   if (roles?.reviewer?.enabled !== false) {
     stages.push('reviewer');
   }
-  if (roles?.tester?.enabled) {
+  if (roles?.tester?.enabled || verify?.enabled) {
     stages.push('tester');
   }
   if (roles?.documenter?.enabled) {
@@ -1384,6 +1382,7 @@ export function createPipelineFromConfig(
     jobProfiles,
     draftAnalysis,
     runMetadata,
+    verify,
   });
 }
 
@@ -1453,6 +1452,7 @@ function summarizeStageResult(
         failed: r.testsFailed,
         coverage: r.coverage,
         failedTests: Array.isArray(r.failedTests) ? r.failedTests.slice(0, MAX_FILES) : undefined,
+        deterministic: r.deterministic,
         error: r.error ? cap(r.error, FEEDBACK_CAP) : undefined,
       };
     }

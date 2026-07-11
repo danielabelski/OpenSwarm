@@ -1,5 +1,5 @@
 import type { TaskItem } from '../orchestration/decisionEngine.js';
-import type { PipelineStage, RoleConfig, PipelineGuardsConfig, JobProfile } from '../core/types.js';
+import type { PipelineStage, RoleConfig, PipelineGuardsConfig, JobProfile, VerifyConfig } from '../core/types.js';
 import type { CostInfo } from '../support/costTracker.js';
 import type { WorkerResult, ReviewResult, PairSession } from './agentPair.js';
 import type { TesterResult } from './tester.js';
@@ -9,6 +9,7 @@ import type { SkillDocumenterResult } from './skillDocumenter.js';
 import type { GuardsRunResult } from './pipelineGuards.js';
 import type { ReflectionState } from './reflection.js';
 import type { WorkerFanoutGateDecision } from './workerFanoutGate.js';
+import type { VerifyCommand } from '../verify/manifest.js';
 
 export interface PipelineRunMetadata {
   repository?: string;
@@ -34,6 +35,7 @@ export interface PipelineConfig {
     'skill-documenter'?: RoleConfig;
   };
   guards?: Partial<PipelineGuardsConfig>;
+  verify?: VerifyConfig;
   jobProfiles?: JobProfile[];
   runMetadata?: PipelineRunMetadata;
   skipTesterIfNoCodeChange?: boolean;
@@ -65,7 +67,8 @@ export interface PipelineResult {
   success: boolean;
   sessionId: string;
   stages: StageResult[];
-  finalStatus: 'approved' | 'rejected' | 'failed' | 'cancelled' | 'decomposed' | 'rate_limited' | 'infra_error';
+  finalStatus: 'approved' | 'rejected' | 'failed' | 'cancelled' | 'decomposed' | 'superseded' | 'rate_limited' | 'infra_error';
+  failureSignal?: 'gate-fail' | 'timeout';
   rateLimitResetsAt?: number;
   totalDuration: number;
   iterations: number;
@@ -112,6 +115,12 @@ export interface PipelineContext {
   workerEscalation?: { model?: string; reasoningEffort?: 'low' | 'medium' | 'high' };
   /** The missing-validation-evidence gate has already nudged once this session — after that it defers to the reviewer instead of consuming more iterations (INT-2485). */
   validationNudged?: boolean;
+  /** Commands captured before the worker runs, preventing self-modification of the verification gate. */
+  trustedVerifyCommands?: VerifyCommand[];
+  trustedVerifyPackageJsonByDirectory?: Record<string, string>;
+  trustedVerifyInputFingerprint?: string;
+  /** Deferred capture error so invalid manifests retain tester-stage failure semantics. */
+  trustedVerifyError?: unknown;
 }
 
 export type PipelineEventType = 'stage:start' | 'stage:complete' | 'stage:fail' | 'iteration:start' | 'iteration:complete' | 'iteration:fail' | 'pipeline:complete' | 'pipeline:fail' | 'fanout:gate' | 'halt';

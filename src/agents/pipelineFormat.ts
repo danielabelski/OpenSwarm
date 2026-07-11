@@ -23,6 +23,7 @@ export function formatPipelineResult(result: PipelineResult): string {
     failed: '💥',
     cancelled: '🚫',
     decomposed: '🔀',
+    superseded: '♻️',
     rate_limited: '⏸',
     infra_error: '🔌',
   }[result.finalStatus];
@@ -80,6 +81,7 @@ export function formatPipelineResultEmbed(result: PipelineResult): EmbedBuilder 
     failed: { emoji: '💥', color: 0xFF6B6B, label: 'FAILED' },
     cancelled: { emoji: '🚫', color: 0xFFAA00, label: 'CANCELLED' },
     decomposed: { emoji: '🔀', color: 0x00AAFF, label: 'DECOMPOSED' },
+    superseded: { emoji: '♻️', color: 0x00AAFF, label: 'SUPERSEDED' },
     rate_limited: { emoji: '⏸', color: 0xFFAA00, label: 'RATE LIMITED' },
     infra_error: { emoji: '🔌', color: 0xFFAA00, label: 'INFRA ERROR' },
   }[result.finalStatus] || { emoji: '❓', color: 0x808080, label: 'UNKNOWN' };
@@ -171,7 +173,7 @@ export function formatPipelineResultEmbed(result: PipelineResult): EmbedBuilder 
     const total = test.testsPassed + test.testsFailed;
     const passRate = total > 0 ? ((test.testsPassed / total) * 100).toFixed(1) : '0';
 
-    let testValue = `✅ Passed: ${test.testsPassed}/${total} (${passRate}%)`;
+    let testValue = `✅ Passed: ${test.testsPassed}/${total} (${passRate}%)${test.deterministic ? ' · deterministic' : ''}`;
 
     if (test.coverage !== undefined) {
       testValue += `\n📊 Coverage: ${test.coverage.toFixed(1)}%`;

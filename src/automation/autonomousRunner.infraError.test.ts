@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -53,12 +53,13 @@ const result = (finalStatus: PipelineResult['finalStatus']): PipelineResult => (
 function mockTaskSource() {
   return {
     kind: 'local',
-    updateState: vi.fn(async () => {}),
+    updateState: vi.fn(async () => true),
     addComment: vi.fn(async () => {}),
     logStuck: vi.fn(async () => {}),
     logBlocked: vi.fn(async () => {}),
   } as unknown as ITaskSource & {
     updateState: ReturnType<typeof vi.fn>;
+    addComment: ReturnType<typeof vi.fn>;
     logStuck: ReturnType<typeof vi.fn>;
   };
 }
@@ -84,6 +85,7 @@ describe('AutonomousRunner infra_error handling (INT-2010)', () => {
   }, 30000);
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllEnvs();
     rmSync(tempDir, { recursive: true, force: true });
   });
@@ -98,6 +100,26 @@ describe('AutonomousRunner infra_error handling (INT-2010)', () => {
 
     expect(source.logStuck).not.toHaveBeenCalled();
     expect(source.updateState).not.toHaveBeenCalled(); // no failure-state sync
+    const history = JSON.parse(readFileSync(join(tempDir, 'runner-pipeline-history.json'), 'utf8'));
+    expect(history).toHaveLength(6);
+    expect(history.every((entry: { failureCause?: string }) => entry.failureCause === 'infra')).toBe(true);
+  });
+
+  it('does not persist a superseded open issue as completed (INT-2568)', async () => {
+    const source = mockTaskSource();
+    runnerExecution.setTaskSource(source);
+    const runner = new AutonomousRunner(cfg());
+    const scheduler = (runner as unknown as { scheduler: TaskScheduler }).scheduler;
+    const superseded: PipelineResult = { ...result('superseded'), success: true };
+
+    scheduler.startTask(task(), '/repo', async () => superseded);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const state = JSON.parse(readFileSync(join(tempDir, 'runner-task-state.json'), 'utf8'));
+    expect(state.completed).not.toContain('ISSUE-1');
+    expect(state.retryTimes['ISSUE-1']).toBeGreaterThan(Date.now());
+    expect(scheduler.getStats()).toMatchObject({ completed: 0, failed: 0 });
+    expect(source.updateState).not.toHaveBeenCalled();
   });
 
   it('still marks STUCK after MAX_RETRY_COUNT genuine failures (control)', async () => {
@@ -109,5 +131,64 @@ describe('AutonomousRunner infra_error handling (INT-2010)', () => {
     await runN(scheduler, 'failed', 4);
 
     expect(source.logStuck).toHaveBeenCalled();
+    expect(source.updateState).toHaveBeenCalledTimes(3); // retries only; terminal attempt is parked by logStuck
+  });
+
+  it('returns a retryable genuine failure to Todo immediately', async () => {
+    const source = mockTaskSource();
+    runnerExecution.setTaskSource(source);
+    const runner = new AutonomousRunner(cfg());
+    const scheduler = (runner as unknown as { scheduler: TaskScheduler }).scheduler;
+
+    await runN(scheduler, 'failed', 1);
+
+    expect(source.updateState).toHaveBeenCalledWith('ISSUE-1', 'Todo');
+  });
+
+  it('does not expose terminal failure synchronization as retryable Todo', async () => {
+    const source = mockTaskSource();
+    runnerExecution.setTaskSource(source);
+
+    await runnerExecution.syncFailureState(task(), 'terminal retries exhausted');
+
+    expect(source.updateState).not.toHaveBeenCalled();
+    expect(source.addComment).toHaveBeenCalled();
+  });
+
+  it('reports a refused Todo transition instead of claiming sync success', async () => {
+    const source = mockTaskSource();
+    source.updateState.mockResolvedValue(false);
+    runnerExecution.setTaskSource(source);
+
+    const synced = await runnerExecution.syncFailureState(task(), 'retryable failure', 'Todo');
+
+    expect(synced).toBe(false);
+    expect(source.updateState).toHaveBeenCalledWith('ISSUE-1', 'Todo');
+  });
+
+  it('records rate limits before the retry-hold early return', async () => {
+    const source = mockTaskSource();
+    runnerExecution.setTaskSource(source);
+    const runner = new AutonomousRunner(cfg());
+    const scheduler = (runner as unknown as { scheduler: TaskScheduler }).scheduler;
+
+    await runN(scheduler, 'rate_limited', 1);
+
+    const history = JSON.parse(readFileSync(join(tempDir, 'runner-pipeline-history.json'), 'utf8'));
+    expect(history).toHaveLength(1);
+    expect(history[0].failureCause).toBe('rate-limit');
+  });
+
+  it('records the scheduler hard watchdog as a timeout', async () => {
+    vi.useFakeTimers();
+    const runner = new AutonomousRunner(cfg());
+    const scheduler = (runner as unknown as { scheduler: TaskScheduler }).scheduler;
+
+    scheduler.startTask(task(), '/repo', async () => await new Promise<PipelineResult>(() => {}));
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+
+    const history = JSON.parse(readFileSync(join(tempDir, 'runner-pipeline-history.json'), 'utf8'));
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({ failureCause: 'timeout', finalStatus: 'infra_error' });
   });
 });
